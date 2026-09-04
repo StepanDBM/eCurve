@@ -88,6 +88,14 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.simplify_tolerance = 2.0
         self.minimum_point_distance = 1.5
 
+        self.vertical_symmetry = False
+        self.horizontal_symmetry = False
+        self.radial_symmetry = False
+        self.radial_count = 4
+
+        self.symmetry_color = QtGui.QColor(110, 110, 110, 150)
+        self.active_symmetry_color = QtGui.QColor(180, 125, 55, 160)
+
         self.zoom = 1.0
         self.minimum_zoom = 0.1
         self.maximum_zoom = 10.0
@@ -128,6 +136,22 @@ class ECurveCanvas(QtWidgets.QWidget):
         self._update_cursor()
         self.update()
 
+    def set_vertical_symmetry(self, enabled):
+        self.vertical_symmetry = bool(enabled)
+        self.update()
+
+    def set_horizontal_symmetry(self, enabled):
+        self.horizontal_symmetry = bool(enabled)
+        self.update()
+
+    def set_radial_symmetry(self, enabled):
+        self.radial_symmetry = bool(enabled)
+        self.update()
+
+    def set_radial_count(self, count):
+        self.radial_count = max(2, int(count))
+        self.update()
+
     # ------------------------------------------------------------------
     # Zoom in/out methods and view transformation methods
     # ------------------------------------------------------------------
@@ -141,7 +165,35 @@ class ECurveCanvas(QtWidgets.QWidget):
     def view_to_canvas(self, point):
         center = self.view_center()
         return (point - center - self.pan) / self.zoom
-    
+        
+    def zoom_in(self):
+        self.set_zoom(self.zoom * self.zoom_step)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom / self.zoom_step)
+
+    def set_zoom(self, zoom, anchor=None):
+        zoom = max(self.minimum_zoom, min(self.maximum_zoom, float(zoom)))
+
+        if math.isclose(zoom, self.zoom):
+            return
+
+        if anchor is None:
+            anchor = self.view_center()
+
+        canvas_position = self.view_to_canvas(anchor)
+        self.zoom = zoom
+        self.pan = anchor - self.view_center() - canvas_position * self.zoom
+
+        self.zoomChanged.emit(self.zoom)
+        self.update()
+
+    def reset_view(self):
+        self.zoom = 1.0
+        self.pan = QtCore.QPointF(0.0, 0.0)
+        self.zoomChanged.emit(self.zoom)
+        self.update()
+
     def wheelEvent(self, event):
         position = event_position(event)
 
@@ -227,6 +279,10 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.update()
         self.strokeSelected.emit(None)
         self.strokesChanged.emit()
+
+    # ------------------------------------------------------------------
+    # Mouse methods
+    # ------------------------------------------------------------------
 
     def mousePressEvent(self, event):
         position = event_position(event)
@@ -326,6 +382,169 @@ class ECurveCanvas(QtWidgets.QWidget):
         stroke.set_point(index, position)
         self.update()
 
+    # ------------------------------------------------------------------
+    # Symmetry management methods
+    # ------------------------------------------------------------------
+
+    def symmetry_point_sets(self, points, include_original=True):
+        if not points:
+            return []
+
+        mirrored_sets = [list(points)]
+
+        if self.vertical_symmetry:
+            mirrored_sets += [
+                self._mirror_points(point_set, mirror_x=True)
+                for point_set in list(mirrored_sets)
+            ]
+
+        if self.horizontal_symmetry:
+            mirrored_sets += [
+                self._mirror_points(point_set, mirror_y=True)
+                for point_set in list(mirrored_sets)
+            ]
+
+        transformed_sets = []
+
+        if self.radial_symmetry:
+            for point_set in mirrored_sets:
+                for index in range(self.radial_count):
+                    angle = math.tau * index / self.radial_count
+                    transformed_sets.append(
+                        self._rotate_points(point_set, angle)
+                    )
+        else:
+            transformed_sets = mirrored_sets
+
+        transformed_sets = self._remove_duplicate_point_sets(
+            transformed_sets
+        )
+
+        if include_original:
+            return transformed_sets
+
+        original_signature = self._point_set_signature(points)
+
+        return [
+            point_set
+            for point_set in transformed_sets
+            if self._point_set_signature(point_set) != original_signature
+        ]
+
+    @staticmethod
+    def _mirror_points(points, mirror_x=False, mirror_y=False):
+        x_multiplier = -1.0 if mirror_x else 1.0
+        y_multiplier = -1.0 if mirror_y else 1.0
+
+        return [
+            QtCore.QPointF(
+                point.x() * x_multiplier,
+                point.y() * y_multiplier
+            )
+            for point in points
+        ]
+
+    @staticmethod
+    def _rotate_points(points, angle):
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+
+        return [
+            QtCore.QPointF(
+                point.x() * cosine - point.y() * sine,
+                point.x() * sine + point.y() * cosine
+            )
+            for point in points
+        ]
+
+    @staticmethod
+    def _point_set_signature(points, precision=4):
+        return tuple(
+            (round(point.x(), precision), round(point.y(), precision))
+            for point in points
+        )
+
+    def _remove_duplicate_point_sets(self, point_sets):
+        unique_sets = []
+        signatures = set()
+
+        for points in point_sets:
+            signature = self._point_set_signature(points)
+
+            if signature in signatures:
+                continue
+
+            signatures.add(signature)
+            unique_sets.append(points)
+
+        return unique_sets
+    
+    def _draw_symmetry_preview(self, painter, stroke, active=False):
+        points = stroke.raw_points if active else stroke.points
+
+        if not points:
+            return
+
+        point_sets = self.symmetry_point_sets(
+            points,
+            include_original=False
+        )
+
+        if not point_sets:
+            return
+
+        color = (
+            self.active_symmetry_color
+            if active
+            else self.symmetry_color
+        )
+
+        painter.setPen(QtGui.QPen(
+            color,
+            1.5 / self.zoom,
+            QtCore.Qt.DashLine,
+            QtCore.Qt.RoundCap,
+            QtCore.Qt.RoundJoin
+        ))
+
+        for transformed_points in point_sets:
+            self._draw_point_set(
+                painter,
+                transformed_points,
+                stroke.closed
+            )
+
+    # ------------------------------------------------------------------
+    # Strokes and deletion methods
+    # ------------------------------------------------------------------
+    def get_stroke_point_sets(self, stroke):
+        if stroke not in self.strokes or not stroke.visible:
+            return []
+
+        return self.symmetry_point_sets(
+            stroke.points,
+            include_original=True
+        )
+
+    @staticmethod
+    def _draw_point_set(painter, points, closed=False):
+        if not points:
+            return
+
+        if len(points) == 1:
+            painter.drawPoint(points[0])
+            return
+
+        path = QtGui.QPainterPath(points[0])
+
+        for point in points[1:]:
+            path.lineTo(point)
+
+        if closed:
+            path.closeSubpath()
+
+        painter.drawPath(path)
+
     def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
             if self._delete_selected_point():
@@ -369,10 +588,18 @@ class ECurveCanvas(QtWidgets.QWidget):
         self._draw_grid(painter)
 
         for stroke in self.strokes:
-            if stroke.visible:
-                self._draw_stroke(painter, stroke)
+            if not stroke.visible:
+                continue
+
+            self._draw_symmetry_preview(painter, stroke)
+            self._draw_stroke(painter, stroke)
 
         if self.active_stroke:
+            self._draw_symmetry_preview(
+                painter,
+                self.active_stroke,
+                active=True
+            )
             self._draw_stroke(painter, self.active_stroke, active=True)
 
         painter.restore()
@@ -499,19 +726,8 @@ class ECurveCanvas(QtWidgets.QWidget):
             QtCore.Qt.RoundJoin
         ))
 
-        if len(points) == 1:
-            painter.drawPoint(points[0])
-            return
+        self._draw_point_set(painter, points, stroke.closed)
 
-        path = QtGui.QPainterPath(points[0])
-
-        for point in points[1:]:
-            path.lineTo(point)
-
-        if stroke.closed:
-            path.closeSubpath()
-
-        painter.drawPath(path)
         if stroke.selected and self.current_tool == self.TOOL_EDIT and not active:
             self._draw_edit_points(painter, stroke)
 
