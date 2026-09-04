@@ -24,9 +24,12 @@ class ECurveStroke:
 
         self.points = douglas_peucker(self.raw_points, tolerance)
 
-    def set_points(self, points):
-        self.raw_points = list(points)
-        self.points = list(points)
+    def set_points(self, points, edited=False):
+        self.raw_points = [QtCore.QPointF(point) for point in points]
+        self.points = [QtCore.QPointF(point) for point in points]
+
+        if edited:
+            self.edited = True
 
     def make_editable(self):
         if self.edited:
@@ -64,6 +67,23 @@ class ECurveCanvas(QtWidgets.QWidget):
 
     TOOL_PENCIL = "pencil"
     TOOL_EDIT = "edit"
+    TOOL_TRANSFORM = "transform"
+
+    TRANSFORM_MOVE = "move"
+    TRANSFORM_ROTATE = "rotate"
+    TRANSFORM_SCALE = "scale"
+
+    VALID_TOOLS = (
+        TOOL_PENCIL,
+        TOOL_EDIT,
+        TOOL_TRANSFORM
+    )
+
+    VALID_TRANSFORMS = (
+        TRANSFORM_MOVE,
+        TRANSFORM_ROTATE,
+        TRANSFORM_SCALE
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,10 +99,32 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.strokes = []
         self.active_stroke = None
         self.selected_stroke = None
+        self.selected_strokes = []
 
         self.selected_point_index = None
         self.is_dragging_point = False
         self.point_hit_radius = 8.0
+
+        self.transform_operation = self.TRANSFORM_MOVE
+        self.is_transforming = False
+        self.transform_start_position = QtCore.QPointF()
+        self.transform_pivot = QtCore.QPointF()
+        self.transform_start_points = {}
+
+        self.is_pending_rect_select = False
+        self.pending_rect_start = QtCore.QPointF()
+        self.pending_rect_additive = False
+        self.pending_rect_subtractive = False
+
+        self.is_rect_selecting = False
+        self.rect_select_start = QtCore.QPointF()
+        self.rect_select_current = QtCore.QPointF()
+        self.rect_select_additive = False
+        self.rect_select_subtractive = False
+        self.rect_select_threshold = 4.0
+
+        self.rect_select_fill = QtGui.QColor(70, 170, 255, 35)
+        self.rect_select_outline = QtGui.QColor(70, 170, 255, 220)
 
         self.current_tool = self.TOOL_PENCIL
         self.simplify_tolerance = 2.0
@@ -112,27 +154,52 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.selected_color = QtGui.QColor(70, 170, 255)
         self.active_color = QtGui.QColor(255, 180, 60)
 
-
     def _update_cursor(self):
         if self.is_panning or self.is_dragging_point:
             cursor = QtCore.Qt.ClosedHandCursor
+
+        elif self.is_transforming:
+            if self.transform_operation == self.TRANSFORM_MOVE:
+                cursor = QtCore.Qt.SizeAllCursor
+            elif self.transform_operation == self.TRANSFORM_ROTATE:
+                cursor = QtCore.Qt.CrossCursor
+            else:
+                cursor = QtCore.Qt.SizeFDiagCursor
+
+        elif self.is_rect_selecting:
+            cursor = QtCore.Qt.CrossCursor
+
         elif self.current_tool == self.TOOL_PENCIL:
             cursor = QtCore.Qt.CrossCursor
+
+        elif self.current_tool == self.TOOL_TRANSFORM:
+            cursor = QtCore.Qt.SizeAllCursor
+
         else:
             cursor = QtCore.Qt.ArrowCursor
 
         self.setCursor(cursor)
 
     def set_tool(self, tool):
-        if tool not in (self.TOOL_PENCIL, self.TOOL_EDIT):
+        if tool not in self.VALID_TOOLS:
             raise ValueError("Unsupported canvas tool: {}".format(tool))
 
         self.current_tool = tool
+        self.selected_point_index = None
+        self.is_dragging_point = False
+        self.is_transforming = False
+        self.cancel_pending_rect_selection()
+        self.cancel_rect_selection()
+        self._update_cursor()
+        self.update()
 
-        if tool != self.TOOL_EDIT:
-            self.selected_point_index = None
-            self.is_dragging_point = False
+    def set_transform_operation(self, operation):
+        if operation not in self.VALID_TRANSFORMS:
+            raise ValueError(
+                "Unsupported transform operation: {}".format(operation)
+            )
 
+        self.transform_operation = operation
         self._update_cursor()
         self.update()
 
@@ -221,9 +288,6 @@ class ECurveCanvas(QtWidgets.QWidget):
     def get_visible_strokes(self):
         return [stroke for stroke in self.strokes if stroke.visible]
 
-    def get_selected_stroke(self):
-        return self.selected_stroke
-
     def set_stroke_visibility(self, stroke, visible):
         if stroke not in self.strokes:
             return
@@ -232,23 +296,74 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.update()
         self.strokesChanged.emit()
 
-    def select_stroke(self, stroke):
+    def get_selected_stroke(self):
+        return self.selected_stroke
+
+    def get_selected_strokes(self):
+        return list(self.selected_strokes)
+
+    def clear_selection(self):
+        for stroke in self.strokes:
+            stroke.selected = False
+
+        self.selected_strokes = []
+        self.selected_stroke = None
+        self.selected_point_index = None
+        self.is_dragging_point = False
+
+        self.strokeSelected.emit(None)
+        self.update()
+
+    def set_selected_strokes(self, strokes, active_stroke=None):
+        selected = []
+
+        for stroke in strokes:
+            if stroke in self.strokes and stroke.visible and stroke not in selected:
+                selected.append(stroke)
+
+        for stroke in self.strokes:
+            stroke.selected = stroke in selected
+
+        self.selected_strokes = selected
+
+        if active_stroke in selected:
+            self.selected_stroke = active_stroke
+        elif selected:
+            self.selected_stroke = selected[-1]
+        else:
+            self.selected_stroke = None
+
+        self.selected_point_index = None
+        self.is_dragging_point = False
+        self.strokeSelected.emit(self.selected_stroke)
+        self.update()
+
+    def select_stroke(self, stroke, additive=False, subtractive=False):
         if stroke is not None and stroke not in self.strokes:
             return
 
-        stroke_changed = stroke is not self.selected_stroke
+        if stroke is None:
+            if not additive and not subtractive:
+                self.clear_selection()
+            return
 
-        for item in self.strokes:
-            item.selected = item is stroke
+        selected = list(self.selected_strokes)
 
-        self.selected_stroke = stroke
+        if subtractive:
+            if stroke in selected:
+                selected.remove(stroke)
 
-        if stroke_changed:
-            self.selected_point_index = None
-            self.is_dragging_point = False
+            self.set_selected_strokes(selected)
+            return
 
-        self.update()
-        self.strokeSelected.emit(stroke)
+        if additive:
+            if stroke not in selected:
+                selected.append(stroke)
+
+            self.set_selected_strokes(selected, active_stroke=stroke)
+            return
+
+        self.set_selected_strokes([stroke], active_stroke=stroke)
 
     def delete_stroke(self, stroke):
         if stroke not in self.strokes:
@@ -256,26 +371,48 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         self.strokes.remove(stroke)
 
-        if self.selected_stroke is stroke:
-            self.selected_stroke = None
-            self.selected_point_index = None
-            self.is_dragging_point = False
-            self.strokeSelected.emit(None)
+        selected = [
+            item
+            for item in self.selected_strokes
+            if item is not stroke
+        ]
 
-        self.update()
+        self.set_selected_strokes(selected)
         self.strokesChanged.emit()
+        self.update()
 
     def delete_selected_stroke(self):
-        if self.selected_stroke:
-            self.delete_stroke(self.selected_stroke)
+        self.delete_selected_strokes()
+
+    def delete_selected_strokes(self):
+        selected = list(self.selected_strokes)
+
+        if not selected and self.selected_stroke:
+            selected = [self.selected_stroke]
+
+        if not selected:
+            return
+
+        for stroke in selected:
+            if stroke in self.strokes:
+                self.strokes.remove(stroke)
+
+        self.clear_selection()
+        self.strokesChanged.emit()
+        self.update()
 
     def clear_strokes(self):
         self.strokes.clear()
         self.active_stroke = None
         self.selected_stroke = None
+        self.selected_strokes = []
         self.selected_point_index = None
         self.is_dragging_point = False
+        self.is_transforming = False
+        self.transform_start_points = {}
 
+        self.cancel_pending_rect_selection()
+        self.cancel_rect_selection()
         self.update()
         self.strokeSelected.emit(None)
         self.strokesChanged.emit()
@@ -283,6 +420,142 @@ class ECurveCanvas(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     # Mouse methods
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_additive_selection(event):
+        return bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+
+    @staticmethod
+    def is_subtractive_selection(event):
+        return bool(event.modifiers() & QtCore.Qt.ControlModifier)
+
+    def begin_pending_rect_selection(
+        self,
+        position,
+        additive=False,
+        subtractive=False
+    ):
+        self.is_pending_rect_select = True
+        self.pending_rect_start = QtCore.QPointF(position)
+        self.pending_rect_additive = bool(additive)
+        self.pending_rect_subtractive = bool(subtractive)
+
+    def cancel_pending_rect_selection(self):
+        self.is_pending_rect_select = False
+        self.pending_rect_start = QtCore.QPointF()
+        self.pending_rect_additive = False
+        self.pending_rect_subtractive = False
+
+    def should_start_rect_selection(self, position):
+        if not self.is_pending_rect_select:
+            return False
+
+        dx = position.x() - self.pending_rect_start.x()
+        dy = position.y() - self.pending_rect_start.y()
+        threshold = self.rect_select_threshold
+
+        return dx * dx + dy * dy >= threshold * threshold
+
+    def begin_rect_selection(
+        self,
+        position,
+        additive=False,
+        subtractive=False
+    ):
+        self.is_rect_selecting = True
+        self.rect_select_start = QtCore.QPointF(position)
+        self.rect_select_current = QtCore.QPointF(position)
+        self.rect_select_additive = bool(additive)
+        self.rect_select_subtractive = bool(subtractive)
+        self._update_cursor()
+        self.update()
+
+    def update_rect_selection(self, position):
+        if not self.is_rect_selecting:
+            return
+
+        self.rect_select_current = QtCore.QPointF(position)
+        self.update()
+
+    def cancel_rect_selection(self):
+        self.is_rect_selecting = False
+        self.rect_select_start = QtCore.QPointF()
+        self.rect_select_current = QtCore.QPointF()
+        self.rect_select_additive = False
+        self.rect_select_subtractive = False
+        self._update_cursor()
+        self.update()
+
+    def get_rect_selection_view_rect(self):
+        if not self.is_rect_selecting:
+            return QtCore.QRectF()
+
+        return QtCore.QRectF(
+            self.rect_select_start,
+            self.rect_select_current
+        ).normalized()
+
+    def get_rect_selection_canvas_rect(self):
+        view_rect = self.get_rect_selection_view_rect()
+
+        if view_rect.isNull():
+            return QtCore.QRectF()
+
+        top_left = self.view_to_canvas(view_rect.topLeft())
+        bottom_right = self.view_to_canvas(view_rect.bottomRight())
+
+        return QtCore.QRectF(
+            top_left,
+            bottom_right
+        ).normalized()
+
+    def stroke_bounds(self, stroke):
+        if not stroke.points:
+            return QtCore.QRectF()
+
+        polygon = QtGui.QPolygonF(stroke.points)
+        return polygon.boundingRect()
+
+    def strokes_intersecting_rect(self, rect):
+        result = []
+
+        for stroke in self.strokes:
+            if not stroke.visible or not stroke.points:
+                continue
+
+            if self.stroke_bounds(stroke).intersects(rect):
+                result.append(stroke)
+
+        return result
+
+    def end_rect_selection(self):
+        if not self.is_rect_selecting:
+            return
+
+        rect = self.get_rect_selection_canvas_rect()
+        additive = self.rect_select_additive
+        subtractive = self.rect_select_subtractive
+        intersected = self.strokes_intersecting_rect(rect)
+        selected = list(self.selected_strokes)
+
+        if subtractive:
+            selected = [
+                stroke
+                for stroke in selected
+                if stroke not in intersected
+            ]
+
+        elif additive:
+            for stroke in intersected:
+                if stroke not in selected:
+                    selected.append(stroke)
+
+        else:
+            selected = intersected
+
+        active_stroke = intersected[-1] if intersected else None
+        self.cancel_rect_selection()
+        self.set_selected_strokes(selected, active_stroke)
 
     def mousePressEvent(self, event):
         position = event_position(event)
@@ -295,14 +568,17 @@ class ECurveCanvas(QtWidgets.QWidget):
             return
 
         if event.button() != QtCore.Qt.LeftButton:
-            return super().mousePressEvent(event)
+            super().mousePressEvent(event)
+            return
 
         canvas_position = self.view_to_canvas(position)
 
         if self.current_tool == self.TOOL_PENCIL:
             self._begin_stroke(canvas_position)
+            event.accept()
+            return
 
-        elif self.current_tool == self.TOOL_EDIT:
+        if self.current_tool == self.TOOL_EDIT:
             point_index = self.point_at(canvas_position)
 
             if point_index is not None:
@@ -316,8 +592,37 @@ class ECurveCanvas(QtWidgets.QWidget):
                 stroke = self.stroke_at(canvas_position, threshold)
                 self.select_stroke(stroke)
 
-        event.accept()
+            event.accept()
+            return
 
+        if self.current_tool == self.TOOL_TRANSFORM:
+            additive = self.is_additive_selection(event)
+            subtractive = self.is_subtractive_selection(event)
+            threshold = 7.0 / self.zoom
+            stroke = self.stroke_at(canvas_position, threshold)
+
+            if stroke:
+                was_selected = stroke in self.selected_strokes
+                self.select_stroke(
+                    stroke,
+                    additive=additive,
+                    subtractive=subtractive
+                )
+
+                if not additive and not subtractive:
+                    if was_selected or stroke in self.selected_strokes:
+                        self.begin_transform(canvas_position)
+            else:
+                self.begin_pending_rect_selection(
+                    position,
+                    additive=additive,
+                    subtractive=subtractive
+                )
+
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         position = event_position(event)
@@ -330,14 +635,45 @@ class ECurveCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
+        if self.is_pending_rect_select:
+            if self.should_start_rect_selection(position):
+                start = QtCore.QPointF(self.pending_rect_start)
+                additive = self.pending_rect_additive
+                subtractive = self.pending_rect_subtractive
+                self.cancel_pending_rect_selection()
+                self.begin_rect_selection(
+                    start,
+                    additive=additive,
+                    subtractive=subtractive
+                )
+                self.update_rect_selection(position)
+
+            event.accept()
+            return
+
+        if self.is_rect_selecting:
+            self.update_rect_selection(position)
+            event.accept()
+            return
+
+        if self.is_transforming:
+            if not event.buttons() & QtCore.Qt.LeftButton:
+                self.end_transform()
+                return
+
+            self.update_transform(self.view_to_canvas(position))
+            event.accept()
+            return
+
         if self.is_dragging_point:
             if not event.buttons() & QtCore.Qt.LeftButton:
                 self.is_dragging_point = False
                 self._update_cursor()
                 return
 
-            canvas_position = self.view_to_canvas(position)
-            self._move_selected_point(canvas_position)
+            self._move_selected_point(
+                self.view_to_canvas(position)
+            )
             event.accept()
             return
 
@@ -347,7 +683,9 @@ class ECurveCanvas(QtWidgets.QWidget):
         if not event.buttons() & QtCore.Qt.LeftButton:
             return super().mouseMoveEvent(event)
 
-        self._append_stroke_point(self.view_to_canvas(position))
+        self._append_stroke_point(
+            self.view_to_canvas(position)
+        )
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -357,18 +695,40 @@ class ECurveCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
-        if event.button() == QtCore.Qt.LeftButton and self.is_dragging_point:
-            self.is_dragging_point = False
-            self._update_cursor()
-            self.strokesChanged.emit()
-            self.update()
-            event.accept()
-            return
+        if event.button() == QtCore.Qt.LeftButton:
+            if self.is_pending_rect_select:
+                subtractive = self.pending_rect_subtractive
+                additive = self.pending_rect_additive
+                self.cancel_pending_rect_selection()
 
-        if event.button() == QtCore.Qt.LeftButton and self.active_stroke:
-            self._finish_stroke()
-            event.accept()
-            return
+                if not additive and not subtractive:
+                    self.clear_selection()
+
+                event.accept()
+                return
+
+            if self.is_rect_selecting:
+                self.end_rect_selection()
+                event.accept()
+                return
+
+            if self.is_transforming:
+                self.end_transform()
+                event.accept()
+                return
+
+            if self.is_dragging_point:
+                self.is_dragging_point = False
+                self._update_cursor()
+                self.strokesChanged.emit()
+                self.update()
+                event.accept()
+                return
+
+            if self.active_stroke:
+                self._finish_stroke()
+                event.accept()
+                return
 
         super().mouseReleaseEvent(event)
 
@@ -380,6 +740,141 @@ class ECurveCanvas(QtWidgets.QWidget):
             return
 
         stroke.set_point(index, position)
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Transform methods
+    # ------------------------------------------------------------------
+
+    def selection_bounds(self):
+        points = [
+            point
+            for stroke in self.selected_strokes
+            for point in stroke.points
+        ]
+
+        if not points:
+            return QtCore.QRectF()
+
+        return QtGui.QPolygonF(points).boundingRect()
+
+    def selection_pivot(self):
+        bounds = self.selection_bounds()
+
+        if bounds.isNull():
+            return QtCore.QPointF()
+
+        return bounds.center()
+
+    def begin_transform(self, position):
+        if not self.selected_strokes:
+            return False
+
+        self.is_transforming = True
+        self.transform_start_position = QtCore.QPointF(position)
+        self.transform_pivot = self.selection_pivot()
+        self.transform_start_points = {}
+
+        for stroke in self.selected_strokes:
+            stroke.make_editable()
+            self.transform_start_points[stroke] = [
+                QtCore.QPointF(point)
+                for point in stroke.points
+            ]
+
+        self._update_cursor()
+        self.update()
+        return True
+
+    def update_transform(self, position):
+        if not self.is_transforming:
+            return
+
+        if self.transform_operation == self.TRANSFORM_MOVE:
+            self._update_move_transform(position)
+
+        elif self.transform_operation == self.TRANSFORM_ROTATE:
+            self._update_rotate_transform(position)
+
+        elif self.transform_operation == self.TRANSFORM_SCALE:
+            self._update_scale_transform(position)
+
+        self.update()
+
+    def _update_move_transform(self, position):
+        delta = position - self.transform_start_position
+
+        for stroke, start_points in self.transform_start_points.items():
+            points = [
+                point + delta
+                for point in start_points
+            ]
+            stroke.set_points(points, edited=True)
+
+    def _update_rotate_transform(self, position):
+        pivot = self.transform_pivot
+        start_vector = self.transform_start_position - pivot
+        current_vector = position - pivot
+
+        start_angle = math.atan2(
+            start_vector.y(),
+            start_vector.x()
+        )
+        current_angle = math.atan2(
+            current_vector.y(),
+            current_vector.x()
+        )
+
+        angle = current_angle - start_angle
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+
+        for stroke, start_points in self.transform_start_points.items():
+            points = []
+
+            for point in start_points:
+                local_x = point.x() - pivot.x()
+                local_y = point.y() - pivot.y()
+
+                points.append(QtCore.QPointF(
+                    pivot.x() + local_x * cosine - local_y * sine,
+                    pivot.y() + local_x * sine + local_y * cosine
+                ))
+
+            stroke.set_points(points, edited=True)
+
+    def _update_scale_transform(self, position):
+        pivot = self.transform_pivot
+        start_distance = point_distance(
+            pivot,
+            self.transform_start_position
+        )
+
+        if start_distance <= 0.000001:
+            return
+
+        current_distance = point_distance(pivot, position)
+        scale = max(0.001, current_distance / start_distance)
+
+        for stroke, start_points in self.transform_start_points.items():
+            points = [
+                QtCore.QPointF(
+                    pivot.x() + (point.x() - pivot.x()) * scale,
+                    pivot.y() + (point.y() - pivot.y()) * scale
+                )
+                for point in start_points
+            ]
+
+            stroke.set_points(points, edited=True)
+
+    def end_transform(self):
+        if not self.is_transforming:
+            return
+
+        self.is_transforming = False
+        self.transform_start_points = {}
+        self._update_cursor()
+        self.strokesChanged.emit()
         self.update()
 
     # ------------------------------------------------------------------
@@ -546,16 +1041,63 @@ class ECurveCanvas(QtWidgets.QWidget):
         painter.drawPath(path)
 
     def keyPressEvent(self, event):
-        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+        if self.current_tool == self.TOOL_TRANSFORM:
+            if event.key() == QtCore.Qt.Key_W:
+                self.set_transform_operation(self.TRANSFORM_MOVE)
+                event.accept()
+                return
+
+            if event.key() == QtCore.Qt.Key_E:
+                self.set_transform_operation(self.TRANSFORM_ROTATE)
+                event.accept()
+                return
+
+            if event.key() == QtCore.Qt.Key_R:
+                self.set_transform_operation(self.TRANSFORM_SCALE)
+                event.accept()
+                return
+
+        if event.key() == QtCore.Qt.Key_Escape:
+            if self.is_transforming:
+                self.cancel_transform()
+                event.accept()
+                return
+
+            if self.is_rect_selecting or self.is_pending_rect_select:
+                self.cancel_pending_rect_selection()
+                self.cancel_rect_selection()
+                event.accept()
+                return
+
+            self.clear_selection()
+            event.accept()
+            return
+
+        if event.key() in (
+            QtCore.Qt.Key_Delete,
+            QtCore.Qt.Key_Backspace
+        ):
             if self._delete_selected_point():
                 event.accept()
                 return
 
-            self.delete_selected_stroke()
+            self.delete_selected_strokes()
             event.accept()
             return
 
         super().keyPressEvent(event)
+
+    def cancel_transform(self):
+        if not self.is_transforming:
+            return
+
+        for stroke, points in self.transform_start_points.items():
+            stroke.set_points(points, edited=True)
+
+        self.is_transforming = False
+        self.transform_start_points = {}
+        self._update_cursor()
+        self.update()
 
     def _delete_selected_point(self):
         if self.current_tool != self.TOOL_EDIT:
@@ -602,7 +1144,55 @@ class ECurveCanvas(QtWidgets.QWidget):
             )
             self._draw_stroke(painter, self.active_stroke, active=True)
 
+        if (
+            self.current_tool == self.TOOL_TRANSFORM
+            and self.selected_strokes
+        ):
+            self._draw_transform_bounds(painter)
+
         painter.restore()
+        self._draw_rect_selection(painter)
+
+    def _draw_transform_bounds(self, painter):
+        bounds = self.selection_bounds()
+
+        if bounds.isNull():
+            return
+
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(
+            self.selected_color,
+            1.0 / self.zoom,
+            QtCore.Qt.DashLine
+        ))
+        painter.drawRect(bounds)
+
+        pivot = bounds.center()
+        radius = 4.0 / self.zoom
+
+        painter.setPen(QtGui.QPen(
+            QtGui.QColor(25, 25, 25),
+            1.0 / self.zoom
+        ))
+        painter.setBrush(QtGui.QBrush(self.active_color))
+        painter.drawEllipse(pivot, radius, radius)
+        painter.setBrush(QtCore.Qt.NoBrush)
+
+    def _draw_rect_selection(self, painter):
+        if not self.is_rect_selecting:
+            return
+
+        rect = self.get_rect_selection_view_rect()
+
+        if rect.isNull():
+            return
+
+        painter.setBrush(QtGui.QBrush(self.rect_select_fill))
+        painter.setPen(QtGui.QPen(
+            self.rect_select_outline,
+            1.0
+        ))
+        painter.drawRect(rect)
 
     def stroke_at(self, position, threshold=7.0):
         closest_stroke = None

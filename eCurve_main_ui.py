@@ -33,10 +33,32 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.edit_button = QtWidgets.QPushButton("Edit")
         self.edit_button.setCheckable(True)
 
+        self.transform_button = QtWidgets.QPushButton("Transform")
+        self.transform_button.setCheckable(True)
+        self.transform_button.setToolTip(
+            "Transform selected curves. W: Move, E: Rotate, R: Scale"
+        )
+
+        self.transform_operation_combo = QtWidgets.QComboBox()
+        self.transform_operation_combo.addItem(
+            "Move", ECurveCanvas.TRANSFORM_MOVE
+        )
+        self.transform_operation_combo.addItem(
+            "Rotate", ECurveCanvas.TRANSFORM_ROTATE
+        )
+        self.transform_operation_combo.addItem(
+            "Scale", ECurveCanvas.TRANSFORM_SCALE
+        )
+        self.transform_operation_combo.setToolTip(
+            "Choose the curve transformation operation"
+        )
+        self.transform_operation_combo.setEnabled(False)
+
         self.tool_group = QtWidgets.QButtonGroup(self)
         self.tool_group.setExclusive(True)
         self.tool_group.addButton(self.pencil_button)
         self.tool_group.addButton(self.edit_button)
+        self.tool_group.addButton(self.transform_button)
 
         self.tolerance_spin = QtWidgets.QDoubleSpinBox()
         self.tolerance_spin.setRange(0.0, 25.0)
@@ -46,26 +68,42 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.curve_list = QtWidgets.QListWidget()
         self.curve_list.setMinimumWidth(170)
         self.curve_list.setMaximumWidth(240)
+        self.curve_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection
+        )
+        self.curve_list.setToolTip(
+            "Select one or more curves. Use Ctrl or Shift for multiple selection"
+        )
 
         self.delete_button = QtWidgets.QPushButton("Delete")
         self.clear_button = QtWidgets.QPushButton("Clear All")
         self.create_button = QtWidgets.QPushButton("Create Control")
 
         self.save_file_button = QtWidgets.QPushButton("Save SVG")
-        self.save_file_button.setToolTip("Save the current drawing to an SVG file")
+        self.save_file_button.setToolTip(
+            "Save the current drawing to an SVG file"
+        )
 
         self.load_file_button = QtWidgets.QPushButton("Load SVG")
         self.load_file_button.setToolTip("Load curves from an SVG file")
 
         self.save_scene_button = QtWidgets.QPushButton("Save to Scene")
-        self.save_scene_button.setToolTip("Save the current drawing inside the Maya scene")
+        self.save_scene_button.setToolTip(
+            "Save the current drawing inside the Maya scene"
+        )
 
         self.load_scene_button = QtWidgets.QPushButton("Load from Scene")
-        self.load_scene_button.setToolTip("Load the stored drawing from the Maya scene")
+        self.load_scene_button.setToolTip(
+            "Load the stored drawing from the Maya scene"
+        )
 
         toolbar_layout = QtWidgets.QHBoxLayout()
         toolbar_layout.addWidget(self.pencil_button)
         toolbar_layout.addWidget(self.edit_button)
+        toolbar_layout.addWidget(self.transform_button)
+        toolbar_layout.addSpacing(12)
+        toolbar_layout.addWidget(QtWidgets.QLabel("Operation"))
+        toolbar_layout.addWidget(self.transform_operation_combo)
         toolbar_layout.addSpacing(12)
         toolbar_layout.addWidget(QtWidgets.QLabel("Simplify"))
         toolbar_layout.addWidget(self.tolerance_spin)
@@ -149,7 +187,7 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.canvas.strokesChanged.connect(self._refresh_curve_list)
         self.canvas.strokeSelected.connect(self._select_curve_list_item)
 
-        self.curve_list.currentRowChanged.connect(self._select_canvas_stroke)
+        self.curve_list.itemSelectionChanged.connect(self._select_canvas_strokes)
         self.curve_list.itemChanged.connect(self._curve_item_changed)
 
         self.delete_button.clicked.connect(self.canvas.delete_selected_stroke)
@@ -166,6 +204,9 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.load_file_button.clicked.connect(self._load_svg)
         self.save_scene_button.clicked.connect(self.storage.save_to_scene)
         self.load_scene_button.clicked.connect(self._load_from_scene)
+
+        self.transform_button.clicked.connect(self._activate_transform_tool)
+        self.transform_operation_combo.currentIndexChanged.connect(self._transform_operation_changed)
 
     def _activate_pencil_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_PENCIL)
@@ -196,28 +237,52 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.curve_list.blockSignals(False)
 
     def _select_curve_list_item(self, stroke):
+        selected_strokes = self.canvas.get_selected_strokes()
+
         self.curve_list.blockSignals(True)
+        self.curve_list.clearSelection()
 
-        if stroke is None:
-            self.curve_list.clearSelection()
-            self.curve_list.setCurrentRow(-1)
-        else:
-            for index in range(self.curve_list.count()):
-                item = self.curve_list.item(index)
+        active_item = None
 
-                if item.data(QtCore.Qt.UserRole) is stroke:
-                    self.curve_list.setCurrentItem(item)
-                    break
+        for index in range(self.curve_list.count()):
+            item = self.curve_list.item(index)
+            item_stroke = item.data(QtCore.Qt.UserRole)
+
+            if item_stroke in selected_strokes:
+                item.setSelected(True)
+
+            if item_stroke is stroke:
+                active_item = item
+
+        if active_item:
+            self.curve_list.setCurrentItem(
+                active_item,
+                QtCore.QItemSelectionModel.NoUpdate
+            )
 
         self.curve_list.blockSignals(False)
 
-    def _select_canvas_stroke(self, row):
-        if row < 0:
-            self.canvas.select_stroke(None)
-            return
+    def _activate_transform_tool(self):
+        self.canvas.set_tool(ECurveCanvas.TOOL_TRANSFORM)
 
-        item = self.curve_list.item(row)
-        self.canvas.select_stroke(item.data(QtCore.Qt.UserRole))
+    def _transform_operation_changed(self):
+        operation = self.transform_operation_combo.currentData()
+        self.canvas.set_transform_operation(operation)
+
+    def _select_canvas_strokes(self):
+        strokes = [
+            item.data(QtCore.Qt.UserRole)
+            for item in self.curve_list.selectedItems()
+        ]
+
+        active_item = self.curve_list.currentItem()
+        active_stroke = (
+            active_item.data(QtCore.Qt.UserRole)
+            if active_item
+            else None
+        )
+
+        self.canvas.set_selected_strokes(strokes,active_stroke=active_stroke)
 
     def _curve_item_changed(self, item):
         stroke = item.data(QtCore.Qt.UserRole)
