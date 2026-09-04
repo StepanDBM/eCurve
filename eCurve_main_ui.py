@@ -1,7 +1,9 @@
+# eCurve_main_ui.py
+
 try:
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 except ImportError:
-    from PySide2 import QtCore, QtWidgets
+    from PySide2 import QtCore, QtGui, QtWidgets
 
 import maya.cmds as cmds
 
@@ -18,6 +20,8 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.setWindowTitle(self.WINDOW_TITLE)
         self.resize(760, 600)
         self.setMinimumSize(520, 400)
+
+        self.control_color = QtGui.QColor(255, 200, 0)
 
         self.canvas = ECurveCanvas()
         self.storage = ECurveStorage(self.canvas)
@@ -65,6 +69,13 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.tolerance_spin.setValue(2.0)
         self.tolerance_spin.setSingleStep(0.25)
 
+        self.color_button = QtWidgets.QPushButton("Controller Color")
+        self.color_button.setToolTip(
+            "Choose the viewport color for generated Maya controllers"
+        )
+        self.color_button.setMinimumWidth(110)
+        self._update_color_button()
+
         self.curve_list = QtWidgets.QListWidget()
         self.curve_list.setMinimumWidth(170)
         self.curve_list.setMaximumWidth(240)
@@ -109,6 +120,7 @@ class ECurveMainUI(QtWidgets.QDialog):
         toolbar_layout.addSpacing(12)
         toolbar_layout.addWidget(QtWidgets.QLabel("Simplify"))
         toolbar_layout.addWidget(self.tolerance_spin)
+        toolbar_layout.addWidget(self.color_button)
         toolbar_layout.addStretch()
 
         self.vertical_symmetry_button = QtWidgets.QPushButton("Vertical")
@@ -199,6 +211,8 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.radial_symmetry_button.toggled.connect(self.canvas.set_radial_symmetry)
         self.radial_symmetry_button.toggled.connect(self.radial_count_spin.setEnabled)
         self.radial_count_spin.valueChanged.connect(self.canvas.set_radial_count)
+
+        self.color_button.clicked.connect(self._choose_control_color)
 
         self.save_file_button.clicked.connect(self._save_svg)
         self.load_file_button.clicked.connect(self._load_svg)
@@ -299,6 +313,58 @@ class ECurveMainUI(QtWidgets.QDialog):
         if operation:
             self.canvas.set_transform_operation(operation)
 
+    def _choose_control_color(self):
+        color = QtWidgets.QColorDialog.getColor(
+            self.control_color,
+            self,
+            "Choose Controller Color"
+        )
+
+        if not color.isValid():
+            return
+
+        self.control_color = color
+        self._update_color_button()
+
+    def _update_color_button(self):
+        color = self.control_color
+        text_color = self._contrasting_text_color(color)
+
+        self.color_button.setStyleSheet(
+            """
+            QPushButton {{
+                background-color: rgb({red}, {green}, {blue});
+                color: rgb({text_red}, {text_green}, {text_blue});
+                border: 1px solid rgb(80, 80, 80);
+                border-radius: 3px;
+                padding: 4px;
+            }}
+
+            QPushButton:hover {{
+                border: 1px solid rgb(180, 180, 180);
+            }}
+            """.format(
+                red=color.red(),
+                green=color.green(),
+                blue=color.blue(),
+                text_red=text_color.red(),
+                text_green=text_color.green(),
+                text_blue=text_color.blue()
+            )
+        )
+
+    def _contrasting_text_color(self, color):
+        brightness = (
+            color.red() * 0.299 +
+            color.green() * 0.587 +
+            color.blue() * 0.114
+        )
+
+        if brightness > 150:
+            return QtGui.QColor(25, 25, 25)
+
+        return QtGui.QColor(240, 240, 240)
+
     def _select_canvas_strokes(self):
         strokes = [
             item.data(QtCore.Qt.UserRole)
@@ -357,6 +423,28 @@ class ECurveMainUI(QtWidgets.QDialog):
         self._update_zoom_label(self.canvas.zoom)
         self._refresh_curve_list()
 
+    def _apply_control_color(self, control):
+        shapes = cmds.listRelatives(
+            control,
+            shapes=True,
+            fullPath=True
+        ) or []
+
+        red = self.control_color.redF()
+        green = self.control_color.greenF()
+        blue = self.control_color.blueF()
+
+        for shape in shapes:
+            cmds.setAttr("{}.overrideEnabled".format(shape), True)
+            cmds.setAttr("{}.overrideRGBColors".format(shape), True)
+            cmds.setAttr(
+                "{}.overrideColorRGB".format(shape),
+                red,
+                green,
+                blue,
+                type="double3"
+            )
+
     def _create_control(self):
         visible_strokes = self.canvas.get_visible_strokes()
 
@@ -413,6 +501,7 @@ class ECurveMainUI(QtWidgets.QDialog):
                 "eCurve_CTRL"
             )
 
+            self._apply_control_color(control)
             cmds.select(control, replace=True)
 
         except Exception as error:
