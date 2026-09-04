@@ -64,6 +64,7 @@ class ECurveCanvas(QtWidgets.QWidget):
     strokeSelected = QtCore.Signal(object)
     strokesChanged = QtCore.Signal()
     zoomChanged = QtCore.Signal(float)
+    transformOperationChanged = QtCore.Signal(str)
 
     TOOL_PENCIL = "pencil"
     TOOL_EDIT = "edit"
@@ -199,7 +200,11 @@ class ECurveCanvas(QtWidgets.QWidget):
                 "Unsupported transform operation: {}".format(operation)
             )
 
+        if operation == self.transform_operation:
+            return
+
         self.transform_operation = operation
+        self.transformOperationChanged.emit(operation)
         self._update_cursor()
         self.update()
 
@@ -558,6 +563,7 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.set_selected_strokes(selected, active_stroke)
 
     def mousePressEvent(self, event):
+        self.setFocus()
         position = event_position(event)
 
         if event.button() == QtCore.Qt.MiddleButton:
@@ -603,15 +609,24 @@ class ECurveCanvas(QtWidgets.QWidget):
 
             if stroke:
                 was_selected = stroke in self.selected_strokes
-                self.select_stroke(
-                    stroke,
-                    additive=additive,
-                    subtractive=subtractive
-                )
+
+                if additive:
+                    self.select_stroke(stroke, additive=True)
+
+                elif subtractive:
+                    self.select_stroke(stroke, subtractive=True)
+
+                elif not was_selected:
+                    self.select_stroke(stroke)
+
+                else:
+                    self.selected_stroke = stroke
+                    self.strokeSelected.emit(stroke)
+                    self.update()
 
                 if not additive and not subtractive:
-                    if was_selected or stroke in self.selected_strokes:
-                        self.begin_transform(canvas_position)
+                    self.begin_transform(canvas_position)
+
             else:
                 self.begin_pending_rect_selection(
                     position,

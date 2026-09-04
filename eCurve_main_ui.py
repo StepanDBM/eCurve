@@ -180,9 +180,7 @@ class ECurveMainUI(QtWidgets.QDialog):
     def _connect_signals(self):
         self.pencil_button.clicked.connect(self._activate_pencil_tool)
         self.edit_button.clicked.connect(self._activate_edit_tool)
-        self.tolerance_spin.valueChanged.connect(
-            self.canvas.set_simplify_tolerance
-        )
+        self.tolerance_spin.valueChanged.connect(self.canvas.set_simplify_tolerance)
 
         self.canvas.strokesChanged.connect(self._refresh_curve_list)
         self.canvas.strokeSelected.connect(self._select_curve_list_item)
@@ -206,6 +204,10 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.load_scene_button.clicked.connect(self._load_from_scene)
 
         self.transform_button.clicked.connect(self._activate_transform_tool)
+        self.canvas.transformOperationChanged.connect(self._sync_transform_operation_combo)
+        self.transform_button.toggled.connect(self.transform_operation_combo.setEnabled)
+        self.transform_button.toggled.connect(
+            lambda enabled: self.tolerance_spin.setEnabled(not enabled))
         self.transform_operation_combo.currentIndexChanged.connect(self._transform_operation_changed)
 
     def _activate_pencil_tool(self):
@@ -215,10 +217,13 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.canvas.set_tool(ECurveCanvas.TOOL_EDIT)
 
     def _refresh_curve_list(self):
-        selected_stroke = self.canvas.get_selected_stroke()
+        selected_strokes = self.canvas.get_selected_strokes()
+        active_stroke = self.canvas.get_selected_stroke()
 
         self.curve_list.blockSignals(True)
         self.curve_list.clear()
+
+        active_item = None
 
         for stroke in self.canvas.strokes:
             item = QtWidgets.QListWidgetItem(stroke.name)
@@ -231,8 +236,17 @@ class ECurveMainUI(QtWidgets.QDialog):
             item.setData(QtCore.Qt.UserRole, stroke)
             self.curve_list.addItem(item)
 
-            if stroke is selected_stroke:
-                self.curve_list.setCurrentItem(item)
+            if stroke in selected_strokes:
+                item.setSelected(True)
+
+            if stroke is active_stroke:
+                active_item = item
+
+        if active_item:
+            self.curve_list.setCurrentItem(
+                active_item,
+                QtCore.QItemSelectionModel.NoUpdate
+            )
 
         self.curve_list.blockSignals(False)
 
@@ -264,10 +278,24 @@ class ECurveMainUI(QtWidgets.QDialog):
 
     def _activate_transform_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_TRANSFORM)
+        self._transform_operation_changed()
+        self.canvas.setFocus()
 
-    def _transform_operation_changed(self):
+    def _sync_transform_operation_combo(self, operation):
+        index = self.transform_operation_combo.findData(operation)
+
+        if index < 0:
+            return
+
+        self.transform_operation_combo.blockSignals(True)
+        self.transform_operation_combo.setCurrentIndex(index)
+        self.transform_operation_combo.blockSignals(False)
+
+    def _transform_operation_changed(self, index=None):
         operation = self.transform_operation_combo.currentData()
-        self.canvas.set_transform_operation(operation)
+
+        if operation:
+            self.canvas.set_transform_operation(operation)
 
     def _select_canvas_strokes(self):
         strokes = [
