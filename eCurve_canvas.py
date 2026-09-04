@@ -15,6 +15,7 @@ class ECurveStroke:
         self.visible = True
         self.selected = False
         self.closed = False
+        self.edited = False
 
     def simplify(self, tolerance):
         if len(self.raw_points) < 3:
@@ -26,6 +27,33 @@ class ECurveStroke:
     def set_points(self, points):
         self.raw_points = list(points)
         self.points = list(points)
+
+    def make_editable(self):
+        if self.edited:
+            return
+
+        self.raw_points = list(self.points)
+        self.edited = True
+
+    def set_point(self, index, point):
+        if not 0 <= index < len(self.points):
+            return
+
+        self.points[index] = QtCore.QPointF(point)
+        self.raw_points = list(self.points)
+        self.edited = True
+
+    def delete_point(self, index):
+        if len(self.points) <= 2:
+            return False
+
+        if not 0 <= index < len(self.points):
+            return False
+
+        del self.points[index]
+        self.raw_points = list(self.points)
+        self.edited = True
+        return True
 
 
 class ECurveCanvas(QtWidgets.QWidget):
@@ -52,6 +80,10 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.active_stroke = None
         self.selected_stroke = None
 
+        self.selected_point_index = None
+        self.is_dragging_point = False
+        self.point_hit_radius = 8.0
+
         self.current_tool = self.TOOL_PENCIL
         self.simplify_tolerance = 2.0
         self.minimum_point_distance = 1.5
@@ -74,7 +106,7 @@ class ECurveCanvas(QtWidgets.QWidget):
 
 
     def _update_cursor(self):
-        if self.is_panning:
+        if self.is_panning or self.is_dragging_point:
             cursor = QtCore.Qt.ClosedHandCursor
         elif self.current_tool == self.TOOL_PENCIL:
             cursor = QtCore.Qt.CrossCursor
@@ -88,7 +120,13 @@ class ECurveCanvas(QtWidgets.QWidget):
             raise ValueError("Unsupported canvas tool: {}".format(tool))
 
         self.current_tool = tool
+
+        if tool != self.TOOL_EDIT:
+            self.selected_point_index = None
+            self.is_dragging_point = False
+
         self._update_cursor()
+        self.update()
 
     # ------------------------------------------------------------------
     # Zoom in/out methods and view transformation methods
@@ -120,6 +158,13 @@ class ECurveCanvas(QtWidgets.QWidget):
 
     def set_simplify_tolerance(self, tolerance):
         self.simplify_tolerance = max(0.0, float(tolerance))
+        canvas_tolerance = self.simplify_tolerance / self.zoom
+
+        for stroke in self.strokes:
+            if not stroke.edited:
+                stroke.simplify(canvas_tolerance)
+
+        self.update()
 
     def get_visible_strokes(self):
         return [stroke for stroke in self.strokes if stroke.visible]
@@ -139,10 +184,17 @@ class ECurveCanvas(QtWidgets.QWidget):
         if stroke is not None and stroke not in self.strokes:
             return
 
+        stroke_changed = stroke is not self.selected_stroke
+
         for item in self.strokes:
             item.selected = item is stroke
 
         self.selected_stroke = stroke
+
+        if stroke_changed:
+            self.selected_point_index = None
+            self.is_dragging_point = False
+
         self.update()
         self.strokeSelected.emit(stroke)
 
@@ -154,6 +206,8 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         if self.selected_stroke is stroke:
             self.selected_stroke = None
+            self.selected_point_index = None
+            self.is_dragging_point = False
             self.strokeSelected.emit(None)
 
         self.update()
@@ -167,6 +221,9 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.strokes.clear()
         self.active_stroke = None
         self.selected_stroke = None
+        self.selected_point_index = None
+        self.is_dragging_point = False
+
         self.update()
         self.strokeSelected.emit(None)
         self.strokesChanged.emit()
@@ -177,7 +234,7 @@ class ECurveCanvas(QtWidgets.QWidget):
         if event.button() == QtCore.Qt.MiddleButton:
             self.is_panning = True
             self.last_pan_position = position
-            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            self._update_cursor()
             event.accept()
             return
 
@@ -188,11 +245,23 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         if self.current_tool == self.TOOL_PENCIL:
             self._begin_stroke(canvas_position)
+
         elif self.current_tool == self.TOOL_EDIT:
-            threshold = 7.0 / self.zoom
-            self.select_stroke(self.stroke_at(canvas_position, threshold))
+            point_index = self.point_at(canvas_position)
+
+            if point_index is not None:
+                self.selected_stroke.make_editable()
+                self.selected_point_index = point_index
+                self.is_dragging_point = True
+                self._update_cursor()
+                self.update()
+            else:
+                threshold = 7.0 / self.zoom
+                stroke = self.stroke_at(canvas_position, threshold)
+                self.select_stroke(stroke)
 
         event.accept()
+
 
     def mouseMoveEvent(self, event):
         position = event_position(event)
@@ -202,6 +271,17 @@ class ECurveCanvas(QtWidgets.QWidget):
             self.pan += delta
             self.last_pan_position = position
             self.update()
+            event.accept()
+            return
+
+        if self.is_dragging_point:
+            if not event.buttons() & QtCore.Qt.LeftButton:
+                self.is_dragging_point = False
+                self._update_cursor()
+                return
+
+            canvas_position = self.view_to_canvas(position)
+            self._move_selected_point(canvas_position)
             event.accept()
             return
 
@@ -221,6 +301,14 @@ class ECurveCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
+        if event.button() == QtCore.Qt.LeftButton and self.is_dragging_point:
+            self.is_dragging_point = False
+            self._update_cursor()
+            self.strokesChanged.emit()
+            self.update()
+            event.accept()
+            return
+
         if event.button() == QtCore.Qt.LeftButton and self.active_stroke:
             self._finish_stroke()
             event.accept()
@@ -228,13 +316,46 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         super().mouseReleaseEvent(event)
 
+    def _move_selected_point(self, position):
+        stroke = self.selected_stroke
+        index = self.selected_point_index
+
+        if not stroke or index is None:
+            return
+
+        stroke.set_point(index, position)
+        self.update()
+
     def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+            if self._delete_selected_point():
+                event.accept()
+                return
+
             self.delete_selected_stroke()
             event.accept()
             return
 
         super().keyPressEvent(event)
+
+    def _delete_selected_point(self):
+        if self.current_tool != self.TOOL_EDIT:
+            return False
+
+        if not self.selected_stroke or self.selected_point_index is None:
+            return False
+
+        deleted = self.selected_stroke.delete_point(
+            self.selected_point_index
+        )
+
+        if not deleted:
+            return False
+
+        self.selected_point_index = None
+        self.update()
+        self.strokesChanged.emit()
+        return True
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -271,6 +392,27 @@ class ECurveCanvas(QtWidgets.QWidget):
                 closest_distance = distance
 
         return closest_stroke
+
+    def point_at(self, position, threshold=None):
+        stroke = self.selected_stroke
+
+        if not stroke or not stroke.visible:
+            return None
+
+        if threshold is None:
+            threshold = self.point_hit_radius / self.zoom
+
+        closest_index = None
+        closest_distance = float("inf")
+
+        for index, point in enumerate(stroke.points):
+            distance = point_distance(position, point)
+
+            if distance <= threshold and distance < closest_distance:
+                closest_index = index
+                closest_distance = distance
+
+        return closest_index
 
     def _begin_stroke(self, position):
         name = "Curve_{:02d}".format(len(self.strokes) + 1)
@@ -370,7 +512,36 @@ class ECurveCanvas(QtWidgets.QWidget):
             path.closeSubpath()
 
         painter.drawPath(path)
+        if stroke.selected and self.current_tool == self.TOOL_EDIT and not active:
+            self._draw_edit_points(painter, stroke)
 
+    def _draw_edit_points(self, painter, stroke):
+        point_size = 7.0 / self.zoom
+        half_size = point_size * 0.5
+
+        normal_color = QtGui.QColor(225, 225, 225)
+        selected_color = self.active_color
+        outline_color = QtGui.QColor(25, 25, 25)
+
+        for index, point in enumerate(stroke.points):
+            rect = QtCore.QRectF(
+                point.x() - half_size,
+                point.y() - half_size,
+                point_size,
+                point_size
+            )
+
+            color = (
+                selected_color
+                if index == self.selected_point_index
+                else normal_color
+            )
+
+            painter.setPen(QtGui.QPen(outline_color, 1.0 / self.zoom))
+            painter.setBrush(QtGui.QBrush(color))
+            painter.drawRect(rect)
+
+        painter.setBrush(QtCore.Qt.NoBrush)
 
 def event_position(event):
     if hasattr(event, "position"):
