@@ -47,6 +47,7 @@ class ECurveStorage:
                 "points": self._serialize_points(stroke.points),
                 "visible": bool(stroke.visible),
                 "closed": bool(stroke.closed),
+                "edited": bool(stroke.edited),
             })
 
         return {
@@ -62,7 +63,7 @@ class ECurveStorage:
             },
         }
 
-    def apply_data(self, data):
+    def apply_data(self, data, replace=True, apply_settings=True):
         if not data:
             cmds.warning("[eCurve] No curve data to apply.")
             return False
@@ -70,49 +71,86 @@ class ECurveStorage:
         curves = data.get("curves", [])
         settings = data.get("settings", {})
 
-        self.canvas.clear_strokes()
+        if not curves:
+            cmds.warning("[eCurve] No curves found in the supplied data.")
+            return False
+
+        if replace:
+            self.canvas.clear_strokes()
+
+        imported_strokes = []
+
         self.canvas.blockSignals(True)
 
         try:
             for index, curve_data in enumerate(curves):
-                points = self._deserialize_points(curve_data.get("points", []))
+                points = self._deserialize_points(
+                    curve_data.get("points", [])
+                )
                 raw_points = self._deserialize_points(
                     curve_data.get("raw_points", [])
                 )
 
                 if not points and raw_points:
-                    points = list(raw_points)
+                    points = [QtCore.QPointF(point) for point in raw_points]
 
                 if not raw_points and points:
-                    raw_points = list(points)
+                    raw_points = [QtCore.QPointF(point) for point in points]
 
                 if len(points) < 2:
                     continue
 
-                stroke = ECurveStroke(
-                    curve_data.get("name", "Curve_{:02d}".format(index + 1)),
-                    raw_points,
+                default_name = "Curve_{:02d}".format(
+                    len(self.canvas.strokes) + 1
                 )
+                requested_name = curve_data.get("name", default_name)
+                unique_name = self._unique_stroke_name(requested_name)
 
-                stroke.points = points
+                stroke = ECurveStroke(unique_name, raw_points)
+                stroke.points = [QtCore.QPointF(point) for point in points]
+                stroke.raw_points = [
+                    QtCore.QPointF(point)
+                    for point in raw_points
+                ]
                 stroke.visible = bool(curve_data.get("visible", True))
                 stroke.closed = bool(curve_data.get("closed", False))
+                stroke.edited = bool(curve_data.get("edited", False))
                 stroke.selected = False
 
                 self.canvas.strokes.append(stroke)
+                imported_strokes.append(stroke)
 
-            self._apply_settings(settings)
+            if apply_settings:
+                self._apply_settings(settings)
         finally:
             self.canvas.blockSignals(False)
 
         self.canvas.active_stroke = None
-        self.canvas.selected_stroke = None
+        self.canvas.selected_point_index = None
+        self.canvas.is_dragging_point = False
+        self.canvas.is_transforming = False
+        self.canvas.transform_start_points = {}
+
+        if replace:
+            self.canvas.clear_selection()
+        elif imported_strokes:
+            self.canvas.set_selected_strokes(
+                imported_strokes,
+                active_stroke=imported_strokes[-1]
+            )
+
         self.canvas.update()
-        self.canvas.strokeSelected.emit(None)
         self.canvas.strokesChanged.emit()
 
-        print("[eCurve] Applied {} curve(s).".format(len(self.canvas.strokes)))
-        return True
+        action = "Applied" if replace else "Imported"
+        print(
+            "[eCurve] {} {} curve(s).".format(
+                action,
+                len(imported_strokes)
+            )
+        )
+
+        return bool(imported_strokes)
 
     def _apply_settings(self, settings):
         tolerance = settings.get("simplify_tolerance")
@@ -184,16 +222,21 @@ class ECurveStorage:
                 cmds.warning("[eCurve] No supported curves found in SVG.")
                 return False
 
-            result = self.apply_data(data)
+            result = self.apply_data(
+                data,
+                replace=False,
+                apply_settings=False
+            )
 
             if result:
-                print("[eCurve] Loaded SVG file:")
+                print("[eCurve] Imported SVG file:")
                 print("         path:", file_path)
 
             return result
+
         except Exception as exc:
-            cmds.warning("[eCurve] Failed to load SVG file.")
-            print("[eCurve] Failed to load SVG file:")
+            cmds.warning("[eCurve] Failed to import SVG file.")
+            print("[eCurve] Failed to import SVG file:")
             print(exc)
             return False
 
@@ -594,7 +637,8 @@ class ECurveStorage:
                 cmds.warning("[eCurve] Scene drawing data is empty.")
                 return False
 
-            result = self.apply_data(json.loads(json_text))
+            result = self.apply_data(json.loads(json_text),
+                replace=True,apply_settings=True)
 
             if result:
                 print("[eCurve] Loaded drawing from Maya scene:")
@@ -636,6 +680,26 @@ class ECurveStorage:
         height = max(maximum_y - minimum_y, 1.0)
 
         return minimum_x, minimum_y, width, height
+
+    def _unique_stroke_name(self, requested_name):
+        base_name = str(requested_name or "Curve")
+        existing_names = {
+            stroke.name
+            for stroke in self.canvas.strokes
+        }
+
+        if base_name not in existing_names:
+            return base_name
+
+        index = 1
+
+        while True:
+            candidate = "{}_{:02d}".format(base_name, index)
+
+            if candidate not in existing_names:
+                return candidate
+
+            index += 1
 
     def _points_to_svg_path(self, points, closed=False):
         path_parts = [

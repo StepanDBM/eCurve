@@ -84,8 +84,10 @@ class ECurveMainUI(QtWidgets.QDialog):
             "Save the current drawing to an SVG file"
         )
 
-        self.load_file_button = QtWidgets.QPushButton("Load SVG")
-        self.load_file_button.setToolTip("Load curves from an SVG file")
+        self.load_file_button = QtWidgets.QPushButton("Import SVG")
+        self.load_file_button.setToolTip(
+            "Import curves from an SVG file without clearing the canvas"
+        )
 
         self.save_scene_button = QtWidgets.QPushButton("Save to Scene")
         self.save_scene_button.setToolTip(
@@ -340,7 +342,8 @@ class ECurveMainUI(QtWidgets.QDialog):
             return
 
         if self.storage.load_from_file(file_path):
-            self._sync_ui_after_load()
+            self._refresh_curve_list()
+            self.canvas.setFocus()
 
     def _load_from_scene(self):
         if self.storage.load_from_scene():
