@@ -323,6 +323,7 @@ class ECurveMainUI(QtWidgets.QDialog):
         toolbar_layout.addWidget(self.tolerance_spin)
         toolbar_layout.addWidget(self.color_button)
         toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.create_button)
 
         self.vertical_symmetry_button = QtWidgets.QPushButton("Vertical")
         self.vertical_symmetry_button.setCheckable(True)
@@ -381,8 +382,6 @@ class ECurveMainUI(QtWidgets.QDialog):
         side_layout.addLayout(file_storage_layout)
         side_layout.addWidget(QtWidgets.QLabel("Maya Scene"))
         side_layout.addLayout(scene_storage_layout)
-        side_layout.addSpacing(8)
-        side_layout.addWidget(self.create_button)
 
         self.primitive_strip = eCurveAssetStrip(PRIMITIVE_ITEMS)
         self.asset_strip = eCurveAssetStrip(ASSET_ITEMS)
