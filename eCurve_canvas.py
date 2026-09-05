@@ -17,6 +17,10 @@ class ECurveStroke:
         self.closed = False
         self.edited = False
 
+        self.horizontal_symmetry_enabled = True
+        self.vertical_symmetry_enabled = True
+        self.radial_symmetry_enabled = True
+        self.radial_count_override = 0
     def simplify(self, tolerance):
         if len(self.raw_points) < 3:
             self.points = list(self.raw_points)
@@ -896,19 +900,46 @@ class ECurveCanvas(QtWidgets.QWidget):
     # Symmetry management methods
     # ------------------------------------------------------------------
 
-    def symmetry_point_sets(self, points, include_original=True):
+    def symmetry_point_sets(
+        self,
+        points,
+        stroke=None,
+        include_original=True
+    ):
         if not points:
             return []
 
+        vertical_enabled = self.vertical_symmetry
+        horizontal_enabled = self.horizontal_symmetry
+        radial_enabled = self.radial_symmetry
+        radial_count = self.radial_count
+
+        if stroke is not None:
+            vertical_enabled = (
+                vertical_enabled
+                and stroke.vertical_symmetry_enabled
+            )
+            horizontal_enabled = (
+                horizontal_enabled
+                and stroke.horizontal_symmetry_enabled
+            )
+            radial_enabled = (
+                radial_enabled
+                and stroke.radial_symmetry_enabled
+            )
+
+            if stroke.radial_count_override > 0:
+                radial_count = stroke.radial_count_override
+
         mirrored_sets = [list(points)]
 
-        if self.vertical_symmetry:
+        if vertical_enabled:
             mirrored_sets += [
                 self._mirror_points(point_set, mirror_x=True)
                 for point_set in list(mirrored_sets)
             ]
 
-        if self.horizontal_symmetry:
+        if horizontal_enabled:
             mirrored_sets += [
                 self._mirror_points(point_set, mirror_y=True)
                 for point_set in list(mirrored_sets)
@@ -916,10 +947,12 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         transformed_sets = []
 
-        if self.radial_symmetry:
+        if radial_enabled:
+            radial_count = max(2, int(radial_count))
+
             for point_set in mirrored_sets:
-                for index in range(self.radial_count):
-                    angle = math.tau * index / self.radial_count
+                for index in range(radial_count):
+                    angle = math.tau * index / radial_count
                     transformed_sets.append(
                         self._rotate_points(point_set, angle)
                     )
@@ -997,6 +1030,7 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         point_sets = self.symmetry_point_sets(
             points,
+            stroke=stroke,
             include_original=False
         )
 
@@ -1033,6 +1067,7 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         return self.symmetry_point_sets(
             stroke.points,
+            stroke=stroke,
             include_original=True
         )
 

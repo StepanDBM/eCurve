@@ -10,6 +10,96 @@ import maya.cmds as cmds
 from eCurve_canvas import ECurveCanvas
 from eCurve_storage import ECurveStorage
 
+class ECurveListItemWidget(QtWidgets.QWidget):
+    symmetryChanged = QtCore.Signal(object)
+
+    def __init__(self, stroke, parent=None):
+        super().__init__(parent)
+
+        self.stroke = stroke
+
+        self.name_label = QtWidgets.QLabel(stroke.name)
+        self.name_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred
+        )
+
+        self.horizontal_button = QtWidgets.QPushButton("H")
+        self.horizontal_button.setCheckable(True)
+        self.horizontal_button.setChecked(
+            stroke.horizontal_symmetry_enabled
+        )
+        self.horizontal_button.setToolTip(
+            "Allow global horizontal symmetry for this curve"
+        )
+
+        self.vertical_button = QtWidgets.QPushButton("V")
+        self.vertical_button.setCheckable(True)
+        self.vertical_button.setChecked(
+            stroke.vertical_symmetry_enabled
+        )
+        self.vertical_button.setToolTip(
+            "Allow global vertical symmetry for this curve"
+        )
+
+        self.radial_button = QtWidgets.QPushButton("R")
+        self.radial_button.setCheckable(True)
+        self.radial_button.setChecked(
+            stroke.radial_symmetry_enabled
+        )
+        self.radial_button.setToolTip(
+            "Allow global radial symmetry for this curve"
+        )
+
+        self.radial_count_spin = QtWidgets.QSpinBox()
+        self.radial_count_spin.setRange(0, 32)
+        self.radial_count_spin.setValue(
+            stroke.radial_count_override
+        )
+        self.radial_count_spin.setToolTip(
+            "0 uses the global radial count. "
+            "Any other value overrides it for this curve"
+        )
+
+        for button in (
+            self.horizontal_button,
+            self.vertical_button,
+            self.radial_button
+        ):
+            button.setFixedSize(24, 22)
+
+        self.radial_count_spin.setFixedWidth(48)
+        self.radial_count_spin.setFixedHeight(22)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(4, 1, 2, 1)
+        layout.setSpacing(2)
+        layout.addWidget(self.name_label, 1)
+        layout.addWidget(self.horizontal_button)
+        layout.addWidget(self.vertical_button)
+        layout.addWidget(self.radial_button)
+        layout.addWidget(self.radial_count_spin)
+
+        self.horizontal_button.toggled.connect(self._horizontal_changed)
+        self.vertical_button.toggled.connect(self._vertical_changed)
+        self.radial_button.toggled.connect(self._radial_changed)
+        self.radial_count_spin.valueChanged.connect(self._radial_count_changed)
+
+    def _horizontal_changed(self, enabled):
+        self.stroke.horizontal_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.stroke)
+
+    def _vertical_changed(self, enabled):
+        self.stroke.vertical_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.stroke)
+
+    def _radial_changed(self, enabled):
+        self.stroke.radial_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.stroke)
+
+    def _radial_count_changed(self, count):
+        self.stroke.radial_count_override = int(count)
+        self.symmetryChanged.emit(self.stroke)
 
 class ECurveMainUI(QtWidgets.QDialog):
     WINDOW_TITLE = "eCurve"
@@ -77,8 +167,8 @@ class ECurveMainUI(QtWidgets.QDialog):
         self._update_color_button()
 
         self.curve_list = QtWidgets.QListWidget()
-        self.curve_list.setMinimumWidth(170)
-        self.curve_list.setMaximumWidth(240)
+        self.curve_list.setMinimumWidth(250)
+        self.curve_list.setMaximumWidth(330)
         self.curve_list.setSelectionMode(
             QtWidgets.QAbstractItemView.ExtendedSelection
         )
@@ -232,6 +322,12 @@ class ECurveMainUI(QtWidgets.QDialog):
     def _activate_edit_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_EDIT)
 
+    def _curve_symmetry_changed(self, stroke):
+        if stroke not in self.canvas.strokes:
+            return
+
+        self.canvas.update()
+
     def _refresh_curve_list(self):
         selected_strokes = self.canvas.get_selected_strokes()
         active_stroke = self.canvas.get_selected_stroke()
@@ -242,15 +338,29 @@ class ECurveMainUI(QtWidgets.QDialog):
         active_item = None
 
         for stroke in self.canvas.strokes:
-            item = QtWidgets.QListWidgetItem(stroke.name)
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item = QtWidgets.QListWidgetItem()
+            item.setFlags(
+                item.flags()
+                | QtCore.Qt.ItemIsUserCheckable
+                | QtCore.Qt.ItemIsSelectable
+                | QtCore.Qt.ItemIsEnabled
+            )
             item.setCheckState(
                 QtCore.Qt.Checked
                 if stroke.visible
                 else QtCore.Qt.Unchecked
             )
             item.setData(QtCore.Qt.UserRole, stroke)
+
+            row_widget = ECurveListItemWidget(stroke)
+            row_widget.symmetryChanged.connect(
+                self._curve_symmetry_changed
+            )
+
+            item.setSizeHint(row_widget.sizeHint())
+
             self.curve_list.addItem(item)
+            self.curve_list.setItemWidget(item, row_widget)
 
             if stroke in selected_strokes:
                 item.setSelected(True)
@@ -417,11 +527,39 @@ class ECurveMainUI(QtWidgets.QDialog):
 
     def _sync_ui_after_load(self):
         self.tolerance_spin.blockSignals(True)
-        self.tolerance_spin.setValue(self.canvas.simplify_tolerance)
+        self.tolerance_spin.setValue(
+            self.canvas.simplify_tolerance
+        )
         self.tolerance_spin.blockSignals(False)
 
-        self._update_zoom_label(self.canvas.zoom)
+        self.vertical_symmetry_button.blockSignals(True)
+        self.horizontal_symmetry_button.blockSignals(True)
+        self.radial_symmetry_button.blockSignals(True)
+        self.radial_count_spin.blockSignals(True)
+
+        self.vertical_symmetry_button.setChecked(
+            self.canvas.vertical_symmetry
+        )
+        self.horizontal_symmetry_button.setChecked(
+            self.canvas.horizontal_symmetry
+        )
+        self.radial_symmetry_button.setChecked(
+            self.canvas.radial_symmetry
+        )
+        self.radial_count_spin.setValue(
+            self.canvas.radial_count
+        )
+        self.radial_count_spin.setEnabled(
+            self.canvas.radial_symmetry
+        )
+
+        self.vertical_symmetry_button.blockSignals(False)
+        self.horizontal_symmetry_button.blockSignals(False)
+        self.radial_symmetry_button.blockSignals(False)
+        self.radial_count_spin.blockSignals(False)
+
         self._refresh_curve_list()
+        self.canvas.update()
 
     def _apply_control_color(self, control):
         shapes = cmds.listRelatives(

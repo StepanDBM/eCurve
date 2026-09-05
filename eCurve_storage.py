@@ -48,6 +48,18 @@ class ECurveStorage:
                 "visible": bool(stroke.visible),
                 "closed": bool(stroke.closed),
                 "edited": bool(stroke.edited),
+                "horizontal_symmetry_enabled": bool(
+                    stroke.horizontal_symmetry_enabled
+                ),
+                "vertical_symmetry_enabled": bool(
+                    stroke.vertical_symmetry_enabled
+                ),
+                "radial_symmetry_enabled": bool(
+                    stroke.radial_symmetry_enabled
+                ),
+                "radial_count_override": int(
+                    stroke.radial_count_override
+                ),
             })
 
         return {
@@ -59,8 +71,22 @@ class ECurveStorage:
                     float(self.canvas.pan.x()),
                     float(self.canvas.pan.y()),
                 ],
-                "simplify_tolerance": float(self.canvas.simplify_tolerance),
-            },
+                "simplify_tolerance": float(
+                    self.canvas.simplify_tolerance
+                ),
+                "horizontal_symmetry": bool(
+                    self.canvas.horizontal_symmetry
+                ),
+                "vertical_symmetry": bool(
+                    self.canvas.vertical_symmetry
+                ),
+                "radial_symmetry": bool(
+                    self.canvas.radial_symmetry
+                ),
+                "radial_count": int(
+                    self.canvas.radial_count
+                ),
+            }
         }
 
     def apply_data(self, data, replace=True, apply_settings=True):
@@ -117,6 +143,29 @@ class ECurveStorage:
                 stroke.edited = bool(curve_data.get("edited", False))
                 stroke.selected = False
 
+                stroke.horizontal_symmetry_enabled = bool(
+                    curve_data.get(
+                        "horizontal_symmetry_enabled",
+                        True
+                    )
+                )
+                stroke.vertical_symmetry_enabled = bool(
+                    curve_data.get(
+                        "vertical_symmetry_enabled",
+                        True
+                    )
+                )
+                stroke.radial_symmetry_enabled = bool(
+                    curve_data.get(
+                        "radial_symmetry_enabled",
+                        True
+                    )
+                )
+                stroke.radial_count_override = max(
+                    0,
+                    int(curve_data.get("radial_count_override", 0))
+                )
+
                 self.canvas.strokes.append(stroke)
                 imported_strokes.append(stroke)
 
@@ -164,14 +213,28 @@ class ECurveStorage:
         if zoom is not None:
             self.canvas.zoom = max(
                 self.canvas.minimum_zoom,
-                min(self.canvas.maximum_zoom, float(zoom)),
+                min(self.canvas.maximum_zoom, float(zoom))
             )
 
         if pan and len(pan) == 2:
             self.canvas.pan = QtCore.QPointF(
                 float(pan[0]),
-                float(pan[1]),
+                float(pan[1])
             )
+
+        self.canvas.horizontal_symmetry = bool(
+            settings.get("horizontal_symmetry", False)
+        )
+        self.canvas.vertical_symmetry = bool(
+            settings.get("vertical_symmetry", False)
+        )
+        self.canvas.radial_symmetry = bool(
+            settings.get("radial_symmetry", False)
+        )
+        self.canvas.radial_count = max(
+            2,
+            int(settings.get("radial_count", 4))
+        )
 
         self.canvas.zoomChanged.emit(self.canvas.zoom)
 
@@ -534,6 +597,11 @@ class ECurveStorage:
             "points": list(serialized_points),
             "visible": visible,
             "closed": bool(closed),
+            "edited": False,
+            "horizontal_symmetry_enabled": True,
+            "vertical_symmetry_enabled": True,
+            "radial_symmetry_enabled": True,
+            "radial_count_override": 0,
         }
 
     def _center_imported_curves(self, curves):
