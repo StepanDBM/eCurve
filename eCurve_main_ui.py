@@ -11,6 +11,12 @@ from eCurve_canvas import ECurveCanvas
 from eCurve_storage import ECurveStorage
 from eCurve_asset_strip import eCurveAssetStrip
 from eCurve_primitives import PRIMITIVE_INFO, create_primitive
+from eCurve_asset_io import (
+    ASSET_DIRECTORY,
+    load_asset,
+    load_asset_library,
+    save_asset
+)
 from eCurve_thumbnail import render_asset_thumbnail
 
 
@@ -37,43 +43,7 @@ def build_primitive_items():
 PRIMITIVE_ITEMS = build_primitive_items()
 
 
-ASSET_ITEMS = [
-    {
-        "name": "FK Circle",
-        "type": "asset",
-        "asset_id": "fk_circle",
-        "strokes": [],
-        "tooltip": "Insert the FK Circle asset",
-    },
-    {
-        "name": "IK Square",
-        "type": "asset",
-        "asset_id": "ik_square",
-        "strokes": [],
-        "tooltip": "Insert the IK Square asset",
-    },
-    {
-        "name": "Rounded Star",
-        "type": "asset",
-        "asset_id": "rounded_star",
-        "strokes": [],
-        "tooltip": "Insert the Rounded Star asset",
-    },
-    {
-        "name": "Hand",
-        "type": "asset",
-        "asset_id": "hand",
-        "strokes": [],
-        "tooltip": "Insert the Hand asset",
-    },
-    {
-        "name": "Foot",
-        "type": "asset",
-        "asset_id": "foot",
-        "strokes": [],
-        "tooltip": "Insert the Foot asset",
-    },
-]
+ASSET_ITEMS = []
 
 
 
@@ -182,11 +152,14 @@ class ECurveMainUI(QtWidgets.QDialog):
 
         self.control_color = QtGui.QColor(255, 200, 0)
 
+        self.library_assets = []
+
         self.canvas = ECurveCanvas()
         self.storage = ECurveStorage(self.canvas)
         self._build_ui()
         self._connect_signals()
         self._refresh_curve_list()
+        self._refresh_asset_library()
 
     def _create_strip_section(self, title, strip, extra_widget=None):
         section = QtWidgets.QWidget()
@@ -362,6 +335,10 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.asset_strip = eCurveAssetStrip(ASSET_ITEMS)
 
         self.save_asset_button = QtWidgets.QPushButton("Save Asset")
+        self.save_asset_button.setToolTip(
+            "Save the selected strokes as one reusable asset.\n"
+            "Library: {}".format(ASSET_DIRECTORY)
+        )
 
         self.primitive_section = self._create_strip_section("Primitives:",
             self.primitive_strip,
@@ -510,6 +487,31 @@ class ECurveMainUI(QtWidgets.QDialog):
             )
 
         self.curve_list.blockSignals(False)
+
+    def _build_asset_item(self, asset):
+        return {
+            "name": asset.name,
+            "type": "asset",
+            "asset": asset,
+            "file_path": asset.metadata.get("file_path"),
+            "thumbnail": render_asset_thumbnail(
+                asset,
+                width=64,
+                height=44,
+                padding=5
+            ),
+            "tooltip": "Insert the '{}' asset".format(asset.name)
+        }
+
+    def _refresh_asset_library(self):
+        self.library_assets = load_asset_library()
+
+        items = [
+            self._build_asset_item(asset)
+            for asset in self.library_assets
+        ]
+
+        self.asset_strip.set_items(items)
 
     def _select_curve_list_item(self, stroke):
         selected_strokes = self.canvas.get_selected_strokes()
@@ -832,9 +834,80 @@ class ECurveMainUI(QtWidgets.QDialog):
 
 
     def _asset_clicked(self, item_data):
-        print("Asset clicked:", item_data["name"])
-        print("Asset data:", item_data)
+        file_path = item_data.get("file_path")
 
+        try:
+            if file_path:
+                asset = load_asset(file_path)
+            else:
+                asset = item_data.get("asset")
+
+            if asset is None:
+                cmds.warning("eCurve: Invalid asset information.")
+                return
+
+            self.canvas.add_asset(asset)
+
+        except Exception as error:
+            cmds.warning(
+                "eCurve: Could not insert asset '{}': {}".format(
+                    item_data.get("name", "Unknown"),
+                    error
+                )
+            )
 
     def _save_asset_clicked(self):
-        print("Save Asset clicked.")
+        selected_strokes = self.canvas.get_selected_strokes()
+
+        if not selected_strokes:
+            cmds.warning(
+                "eCurve: Select one or more strokes or assets first."
+            )
+            return
+
+        name, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "Save eCurve Asset",
+            "Asset name:",
+            QtWidgets.QLineEdit.Normal,
+            "New Asset"
+        )
+
+        if not accepted:
+            return
+
+        name = name.strip()
+
+        if not name:
+            cmds.warning("eCurve: Asset name cannot be empty.")
+            return
+
+        try:
+            asset = self.canvas.create_asset_from_selection(name)
+
+            if asset is None or asset.is_empty():
+                cmds.warning(
+                    "eCurve: The current selection contains no valid strokes."
+                )
+                return
+
+            file_path = save_asset(asset, name)
+            self._refresh_asset_library()
+
+            cmds.inViewMessage(
+                assistMessage="Saved eCurve asset: <hl>{}</hl>".format(
+                    asset.name
+                ),
+                position="midCenterTop",
+                fade=True
+            )
+
+            print("eCurve asset saved:", file_path)
+
+        except Exception as error:
+            cmds.warning(
+                "eCurve: Could not save asset '{}': {}".format(
+                    name,
+                    error
+                )
+            )

@@ -269,6 +269,86 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.strokeSelected.emit(None)
         self.update()
 
+
+
+    # ------------------------------------------------------------------
+    # Asset to stroke management methods
+    # ------------------------------------------------------------------
+    def get_selected_asset_strokes(self):
+        result = []
+        processed_assets = set()
+
+        for selected_stroke in self.selected_strokes:
+            asset = selected_stroke.asset
+
+            if asset is None:
+                if selected_stroke not in result:
+                    result.append(selected_stroke)
+                continue
+
+            asset_key = id(asset)
+
+            if asset_key in processed_assets:
+                continue
+
+            processed_assets.add(asset_key)
+
+            for stroke in asset.strokes:
+                if stroke in self.strokes and stroke not in result:
+                    result.append(stroke)
+
+        return result
+
+    def create_asset_from_selection(self, name):
+        source_strokes = self.get_selected_asset_strokes()
+
+        if not source_strokes:
+            return None
+
+        all_points = [
+            point
+            for stroke in source_strokes
+            for point in stroke.points
+        ]
+
+        if not all_points:
+            return None
+
+        bounds = QtGui.QPolygonF(all_points).boundingRect()
+        pivot = bounds.center()
+        asset_strokes = []
+
+        for source_stroke in source_strokes:
+            points = [
+                QtCore.QPointF(
+                    point.x() - pivot.x(),
+                    point.y() - pivot.y()
+                )
+                for point in source_stroke.points
+            ]
+
+            if not points:
+                continue
+
+            stroke = ECurveStroke(
+                points=points,
+                closed=source_stroke.closed
+            )
+            stroke.edited = True
+            asset_strokes.append(stroke)
+
+        if not asset_strokes:
+            return None
+
+        asset = ECurveAsset(
+            name=name,
+            strokes=asset_strokes,
+            asset_type="custom"
+        )
+
+        asset.metadata["source_stroke_count"] = len(asset_strokes)
+        return asset
+
     def set_selected_strokes(self, strokes, active_stroke=None):
         selected = []
 
@@ -389,17 +469,23 @@ class ECurveCanvas(QtWidgets.QWidget):
         return self.view_to_canvas(self.view_center())
 
     def unique_asset_name(self, base_name):
-        existing_names = {asset.name for asset in self.assets}
+        existing_names = {
+            asset.name.lower()
+            for asset in self.assets
+        }
 
-        if base_name not in existing_names:
+        if base_name.lower() not in existing_names:
             return base_name
 
         index = 2
 
-        while "{}_{:02d}".format(base_name, index) in existing_names:
-            index += 1
+        while True:
+            candidate = "{}_{:02d}".format(base_name, index)
 
-        return "{}_{:02d}".format(base_name, index)
+            if candidate.lower() not in existing_names:
+                return candidate
+
+            index += 1
 
     def unique_stroke_name(self, base_name):
         existing_names = {stroke.name for stroke in self.strokes}
@@ -433,6 +519,7 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         asset = asset.copy()
         asset.name = self.unique_asset_name(asset.name)
+        asset._connect_strokes()
 
         if position is None:
             position = self.visible_canvas_center()
