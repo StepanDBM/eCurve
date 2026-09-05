@@ -5,6 +5,7 @@ import importlib
 MODULE_NAMES = [
     "eCurve_drawables",
     "eCurve_primitives",
+    "eCurve_thumbnail",
     "eCurve_asset_strip",
     "eCurve_canvas",
     "eCurve_storage",

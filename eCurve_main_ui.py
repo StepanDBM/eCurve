@@ -11,20 +11,30 @@ from eCurve_canvas import ECurveCanvas
 from eCurve_storage import ECurveStorage
 from eCurve_asset_strip import eCurveAssetStrip
 from eCurve_primitives import PRIMITIVE_INFO, create_primitive
+from eCurve_thumbnail import render_asset_thumbnail
 
 
-PRIMITIVE_ITEMS = [
-    {
-        "name": info["name"],
-        "type": "primitive",
-        "primitive": primitive_type,
-        "category": info["category"],
-        "tooltip": "Create a {} primitive".format(
-            info["name"].lower()
-        ),
-    }
-    for primitive_type, info in PRIMITIVE_INFO.items()
-]
+def build_primitive_items():
+    items = []
+
+    for primitive_type, info in PRIMITIVE_INFO.items():
+        asset = create_primitive(primitive_type)
+        thumbnail = render_asset_thumbnail(asset)
+
+        items.append({
+            "name": info["name"],
+            "type": "primitive",
+            "primitive": primitive_type,
+            "category": info["category"],
+            "thumbnail": thumbnail,
+            "tooltip": "Create a {} primitive".format(
+                info["name"].lower()
+            ),
+        })
+
+    return items
+
+PRIMITIVE_ITEMS = build_primitive_items()
 
 
 ASSET_ITEMS = [
@@ -160,10 +170,12 @@ class ECurveListItemWidget(QtWidgets.QWidget):
 
 class ECurveMainUI(QtWidgets.QDialog):
     WINDOW_TITLE = "eCurve"
+    OBJECT_NAME = "eCurveMainWindow"
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self.setObjectName(self.OBJECT_NAME)
         self.setWindowTitle(self.WINDOW_TITLE)
         self.resize(760, 600)
         self.setMinimumSize(520, 400)
@@ -809,9 +821,7 @@ class ECurveMainUI(QtWidgets.QDialog):
             return
 
         try:
-            asset = create_primitive(primitive_type)
-            self.canvas.add_asset(asset)
-
+            self.canvas.add_asset(create_primitive(primitive_type))
         except Exception as error:
             cmds.warning(
                 "eCurve: Could not create primitive '{}': {}".format(
