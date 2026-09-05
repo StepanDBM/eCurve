@@ -13,12 +13,12 @@ try:
 except ImportError:
     from PySide2 import QtCore
 
-from eCurve_canvas import ECurveStroke
+from eCurve_drawables import ECurveAsset, ECurveStroke
 
 
 ECURVE_STORAGE_NODE = "eCurve_DATA"
 ECURVE_STORAGE_ATTR = "curveDataJson"
-ECURVE_STORAGE_VERSION = 1
+ECURVE_STORAGE_VERSION = 2
 
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 ECURVE_NAMESPACE = "https://eCurve.dev/schema/1"
@@ -38,32 +38,54 @@ class ECurveStorage:
     # -----------------------------------------------------
 
     def collect_data(self):
-        curves = []
+        assets = []
+        owned_strokes = set()
 
-        for stroke in self.canvas.strokes:
-            curves.append({
-                "name": str(stroke.name),
-                "raw_points": self._serialize_points(stroke.raw_points),
-                "points": self._serialize_points(stroke.points),
-                "visible": bool(stroke.visible),
-                "closed": bool(stroke.closed),
-                "edited": bool(stroke.edited),
+        for asset in self.canvas.assets:
+            asset_strokes = [
+                stroke
+                for stroke in asset.strokes
+                if stroke in self.canvas.strokes
+            ]
+
+            if not asset_strokes:
+                continue
+
+            owned_strokes.update(asset_strokes)
+
+            assets.append({
+                "name": str(asset.name),
+                "asset_type": str(asset.asset_type),
+                "primitive_type": asset.primitive_type,
+                "visible": bool(asset.visible),
                 "horizontal_symmetry_enabled": bool(
-                    stroke.horizontal_symmetry_enabled
+                    asset.horizontal_symmetry_enabled
                 ),
                 "vertical_symmetry_enabled": bool(
-                    stroke.vertical_symmetry_enabled
+                    asset.vertical_symmetry_enabled
                 ),
                 "radial_symmetry_enabled": bool(
-                    stroke.radial_symmetry_enabled
+                    asset.radial_symmetry_enabled
                 ),
                 "radial_count_override": int(
-                    stroke.radial_count_override
+                    asset.radial_count_override
                 ),
+                "metadata": dict(asset.metadata),
+                "strokes": [
+                    self._serialize_stroke(stroke)
+                    for stroke in asset_strokes
+                ],
             })
+
+        curves = [
+            self._serialize_stroke(stroke)
+            for stroke in self.canvas.strokes
+            if stroke not in owned_strokes
+        ]
 
         return {
             "version": ECURVE_STORAGE_VERSION,
+            "assets": assets,
             "curves": curves,
             "settings": {
                 "zoom": float(self.canvas.zoom),
@@ -83,94 +105,187 @@ class ECurveStorage:
                 "radial_symmetry": bool(
                     self.canvas.radial_symmetry
                 ),
-                "radial_count": int(
-                    self.canvas.radial_count
-                ),
+                "radial_count": int(self.canvas.radial_count),
             }
         }
 
+    def _serialize_stroke(self, stroke):
+        return {
+            "name": str(stroke.name),
+            "raw_points": self._serialize_points(stroke.raw_points),
+            "points": self._serialize_points(stroke.points),
+            "visible": bool(stroke.visible),
+            "closed": bool(stroke.closed),
+            "edited": bool(stroke.edited),
+            "horizontal_symmetry_enabled": bool(
+                stroke.horizontal_symmetry_enabled
+            ),
+            "vertical_symmetry_enabled": bool(
+                stroke.vertical_symmetry_enabled
+            ),
+            "radial_symmetry_enabled": bool(
+                stroke.radial_symmetry_enabled
+            ),
+            "radial_count_override": int(
+                stroke.radial_count_override
+            ),
+        }
+
+    def _deserialize_stroke(self, stroke_data):
+        points = self._deserialize_points(
+            stroke_data.get("points", [])
+        )
+        raw_points = self._deserialize_points(
+            stroke_data.get("raw_points", [])
+        )
+
+        if not points and raw_points:
+            points = [QtCore.QPointF(point) for point in raw_points]
+
+        if not raw_points and points:
+            raw_points = [QtCore.QPointF(point) for point in points]
+
+        if len(points) < 2:
+            return None
+
+        stroke = ECurveStroke(
+            points=raw_points,
+            closed=bool(stroke_data.get("closed", False)),
+            name=stroke_data.get("name", "Curve")
+        )
+        stroke.points = [QtCore.QPointF(point) for point in points]
+        stroke.raw_points = [QtCore.QPointF(point) for point in raw_points]
+        stroke.visible = bool(stroke_data.get("visible", True))
+        stroke.edited = bool(stroke_data.get("edited", False))
+        stroke.selected = False
+
+        stroke.horizontal_symmetry_enabled = bool(
+            stroke_data.get("horizontal_symmetry_enabled", True)
+        )
+        stroke.vertical_symmetry_enabled = bool(
+            stroke_data.get("vertical_symmetry_enabled", True)
+        )
+        stroke.radial_symmetry_enabled = bool(
+            stroke_data.get("radial_symmetry_enabled", True)
+        )
+        stroke.radial_count_override = max(
+            0,
+            int(stroke_data.get("radial_count_override", 0))
+        )
+        return stroke
+
     def apply_data(self, data, replace=True, apply_settings=True):
-        if not data:
-            cmds.warning("[eCurve] No curve data to apply.")
+        if not isinstance(data, dict):
+            cmds.warning("[eCurve] Invalid storage data.")
             return False
 
-        curves = data.get("curves", [])
+        asset_entries = data.get("assets", [])
+        curve_entries = data.get("curves", [])
         settings = data.get("settings", {})
 
-        if not curves:
-            cmds.warning("[eCurve] No curves found in the supplied data.")
+        if not isinstance(asset_entries, list):
+            asset_entries = []
+
+        if not isinstance(curve_entries, list):
+            curve_entries = []
+
+        if not asset_entries and not curve_entries:
+            cmds.warning("[eCurve] No curves or assets found in the supplied data.")
             return False
 
         if replace:
             self.canvas.clear_strokes()
 
+        imported_assets = []
         imported_strokes = []
 
         self.canvas.blockSignals(True)
 
         try:
-            for index, curve_data in enumerate(curves):
-                points = self._deserialize_points(
-                    curve_data.get("points", [])
-                )
-                raw_points = self._deserialize_points(
-                    curve_data.get("raw_points", [])
-                )
-
-                if not points and raw_points:
-                    points = [QtCore.QPointF(point) for point in raw_points]
-
-                if not raw_points and points:
-                    raw_points = [QtCore.QPointF(point) for point in points]
-
-                if len(points) < 2:
+            for asset_data in asset_entries:
+                if not isinstance(asset_data, dict):
                     continue
 
-                default_name = "Curve_{:02d}".format(
-                    len(self.canvas.strokes) + 1
-                )
-                requested_name = curve_data.get("name", default_name)
-                unique_name = self._unique_stroke_name(requested_name)
+                asset_strokes = []
 
-                stroke = ECurveStroke(unique_name, raw_points)
-                stroke.points = [QtCore.QPointF(point) for point in points]
-                stroke.raw_points = [
-                    QtCore.QPointF(point)
-                    for point in raw_points
-                ]
-                stroke.visible = bool(curve_data.get("visible", True))
-                stroke.closed = bool(curve_data.get("closed", False))
-                stroke.edited = bool(curve_data.get("edited", False))
-                stroke.selected = False
+                for stroke_data in asset_data.get("strokes", []):
+                    stroke = self._deserialize_stroke(stroke_data)
 
-                stroke.horizontal_symmetry_enabled = bool(
-                    curve_data.get(
-                        "horizontal_symmetry_enabled",
-                        True
-                    )
+                    if stroke:
+                        asset_strokes.append(stroke)
+
+                if not asset_strokes:
+                    continue
+
+                asset_name = self.canvas.unique_asset_name(asset_data.get("name", "Asset"))
+
+                asset = ECurveAsset(
+                    name=asset_name,
+                    strokes=asset_strokes,
+                    asset_type=asset_data.get("asset_type", "custom"),
+                    primitive_type=asset_data.get("primitive_type")
                 )
-                stroke.vertical_symmetry_enabled = bool(
-                    curve_data.get(
-                        "vertical_symmetry_enabled",
-                        True
-                    )
+
+                asset.visible = bool(asset_data.get("visible", True))
+                asset.horizontal_symmetry_enabled = bool(
+                    asset_data.get("horizontal_symmetry_enabled", True)
                 )
-                stroke.radial_symmetry_enabled = bool(
-                    curve_data.get(
-                        "radial_symmetry_enabled",
-                        True
-                    )
+                asset.vertical_symmetry_enabled = bool(
+                    asset_data.get("vertical_symmetry_enabled", True)
                 )
-                stroke.radial_count_override = max(
+                asset.radial_symmetry_enabled = bool(
+                    asset_data.get("radial_symmetry_enabled", True)
+                )
+                asset.radial_count_override = max(
                     0,
-                    int(curve_data.get("radial_count_override", 0))
+                    int(asset_data.get("radial_count_override", 0))
                 )
+
+                metadata = asset_data.get("metadata", {})
+
+                if isinstance(metadata, dict):
+                    asset.metadata = dict(metadata)
+
+                asset._connect_strokes()
+
+                for index, stroke in enumerate(asset.strokes):
+                    stroke.asset = asset
+                    stroke.visible = asset.visible and stroke.visible
+
+                    if len(asset.strokes) == 1:
+                        stroke.name = self._unique_stroke_name(asset.name)
+                    else:
+                        stroke.name = self._unique_stroke_name(
+                            "{}_{:02d}".format(asset.name, index + 1)
+                        )
+
+                    self.canvas.strokes.append(stroke)
+                    imported_strokes.append(stroke)
+
+                self.canvas.assets.append(asset)
+                imported_assets.append(asset)
+
+            for curve_data in curve_entries:
+                stroke = self._deserialize_stroke(curve_data)
+
+                if not stroke:
+                    continue
+
+                stroke.name = self._unique_stroke_name(stroke.name)
+                stroke.asset = None
 
                 self.canvas.strokes.append(stroke)
                 imported_strokes.append(stroke)
 
-            if apply_settings:
+            if apply_settings and isinstance(settings, dict):
                 self._apply_settings(settings)
+
+        except Exception as exc:
+            cmds.warning("[eCurve] Failed while applying stored data.")
+            print("[eCurve] Failed while applying stored data:")
+            print(exc)
+            return False
+
         finally:
             self.canvas.blockSignals(False)
 
@@ -192,9 +307,11 @@ class ECurveStorage:
         self.canvas.strokesChanged.emit()
 
         action = "Applied" if replace else "Imported"
+
         print(
-            "[eCurve] {} {} curve(s).".format(
+            "[eCurve] {} {} asset(s) and {} standalone/total stroke(s).".format(
                 action,
+                len(imported_assets),
                 len(imported_strokes)
             )
         )

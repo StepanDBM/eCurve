@@ -140,7 +140,10 @@ class ECurveAsset:
             stroke.asset = self
 
             if multiple_strokes:
-                stroke.name = "{}_{:02d}".format(self.name, index + 1)
+                stroke.name = "{}_{:02d}".format(
+                    self.name,
+                    index + 1
+                )
             else:
                 stroke.name = self.name
 

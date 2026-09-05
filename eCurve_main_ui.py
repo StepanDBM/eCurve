@@ -19,6 +19,12 @@ from eCurve_asset_io import (
 )
 from eCurve_thumbnail import render_asset_thumbnail
 
+TREE_ROLE_OBJECT = QtCore.Qt.UserRole
+TREE_ROLE_TYPE = QtCore.Qt.UserRole + 1
+
+TREE_TYPE_ASSET = "asset"
+TREE_TYPE_STROKE = "stroke"
+TREE_TYPE_STANDALONE = "standalone"
 
 def build_primitive_items():
     items = []
@@ -47,55 +53,65 @@ ASSET_ITEMS = []
 
 
 
-class ECurveListItemWidget(QtWidgets.QWidget):
+class ECurveTreeItemWidget(QtWidgets.QWidget):
     symmetryChanged = QtCore.Signal(object)
 
-    def __init__(self, stroke, parent=None):
+    def __init__(self, drawable, is_asset=False, parent=None):
         super().__init__(parent)
 
-        self.stroke = stroke
+        self.drawable = drawable
+        self.is_asset = bool(is_asset)
 
-        self.name_label = QtWidgets.QLabel(stroke.name)
+        self.name_label = QtWidgets.QLabel(drawable.name)
         self.name_label.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Preferred
         )
 
+        if self.is_asset:
+            font = self.name_label.font()
+            font.setBold(True)
+            self.name_label.setFont(font)
+
         self.horizontal_button = QtWidgets.QPushButton("H")
         self.horizontal_button.setCheckable(True)
         self.horizontal_button.setChecked(
-            stroke.horizontal_symmetry_enabled
+            drawable.horizontal_symmetry_enabled
         )
         self.horizontal_button.setToolTip(
-            "Allow global horizontal symmetry for this curve"
+            self._symmetry_tooltip("horizontal")
         )
 
         self.vertical_button = QtWidgets.QPushButton("V")
         self.vertical_button.setCheckable(True)
         self.vertical_button.setChecked(
-            stroke.vertical_symmetry_enabled
+            drawable.vertical_symmetry_enabled
         )
         self.vertical_button.setToolTip(
-            "Allow global vertical symmetry for this curve"
+            self._symmetry_tooltip("vertical")
         )
 
         self.radial_button = QtWidgets.QPushButton("R")
         self.radial_button.setCheckable(True)
         self.radial_button.setChecked(
-            stroke.radial_symmetry_enabled
+            drawable.radial_symmetry_enabled
         )
         self.radial_button.setToolTip(
-            "Allow global radial symmetry for this curve"
+            self._symmetry_tooltip("radial")
         )
 
         self.radial_count_spin = QtWidgets.QSpinBox()
         self.radial_count_spin.setRange(0, 32)
         self.radial_count_spin.setValue(
-            stroke.radial_count_override
+            drawable.radial_count_override
         )
         self.radial_count_spin.setToolTip(
-            "0 uses the global radial count. "
-            "Any other value overrides it for this curve"
+            "0 uses the parent or global radial count. "
+            "Any other value overrides it at this level"
+        )
+
+        self.radial_count_spin.setEnabled(
+            drawable.radial_symmetry_enabled
         )
 
         for button in (
@@ -105,11 +121,10 @@ class ECurveListItemWidget(QtWidgets.QWidget):
         ):
             button.setFixedSize(24, 22)
 
-        self.radial_count_spin.setFixedWidth(48)
-        self.radial_count_spin.setFixedHeight(22)
+        self.radial_count_spin.setFixedSize(48, 22)
 
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 1, 2, 1)
+        layout.setContentsMargins(2, 1, 2, 1)
         layout.setSpacing(2)
         layout.addWidget(self.name_label, 1)
         layout.addWidget(self.horizontal_button)
@@ -117,26 +132,44 @@ class ECurveListItemWidget(QtWidgets.QWidget):
         layout.addWidget(self.radial_button)
         layout.addWidget(self.radial_count_spin)
 
-        self.horizontal_button.toggled.connect(self._horizontal_changed)
-        self.vertical_button.toggled.connect(self._vertical_changed)
-        self.radial_button.toggled.connect(self._radial_changed)
-        self.radial_count_spin.valueChanged.connect(self._radial_count_changed)
+        self.horizontal_button.toggled.connect(
+            self._horizontal_changed
+        )
+        self.vertical_button.toggled.connect(
+            self._vertical_changed
+        )
+        self.radial_button.toggled.connect(
+            self._radial_changed
+        )
+        self.radial_button.toggled.connect(
+            self.radial_count_spin.setEnabled
+        )
+        self.radial_count_spin.valueChanged.connect(
+            self._radial_count_changed
+        )
+
+    def _symmetry_tooltip(self, symmetry_type):
+        level = "asset" if self.is_asset else "stroke"
+        return "Allow global {} symmetry for this {}".format(
+            symmetry_type,
+            level
+        )
 
     def _horizontal_changed(self, enabled):
-        self.stroke.horizontal_symmetry_enabled = bool(enabled)
-        self.symmetryChanged.emit(self.stroke)
+        self.drawable.horizontal_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.drawable)
 
     def _vertical_changed(self, enabled):
-        self.stroke.vertical_symmetry_enabled = bool(enabled)
-        self.symmetryChanged.emit(self.stroke)
+        self.drawable.vertical_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.drawable)
 
     def _radial_changed(self, enabled):
-        self.stroke.radial_symmetry_enabled = bool(enabled)
-        self.symmetryChanged.emit(self.stroke)
+        self.drawable.radial_symmetry_enabled = bool(enabled)
+        self.symmetryChanged.emit(self.drawable)
 
     def _radial_count_changed(self, count):
-        self.stroke.radial_count_override = int(count)
-        self.symmetryChanged.emit(self.stroke)
+        self.drawable.radial_count_override = int(count)
+        self.symmetryChanged.emit(self.drawable)
 
 class ECurveMainUI(QtWidgets.QDialog):
     WINDOW_TITLE = "eCurve"
@@ -153,6 +186,7 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.control_color = QtGui.QColor(255, 200, 0)
 
         self.library_assets = []
+        self._syncing_asset_tree = False
 
         self.canvas = ECurveCanvas()
         self.storage = ECurveStorage(self.canvas)
@@ -225,14 +259,32 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.color_button.setMinimumWidth(110)
         self._update_color_button()
 
-        self.curve_list = QtWidgets.QListWidget()
-        self.curve_list.setMinimumWidth(250)
-        self.curve_list.setMaximumWidth(330)
-        self.curve_list.setSelectionMode(
+        self.asset_tree = QtWidgets.QTreeWidget()
+        self.asset_tree.setColumnCount(2)
+        self.asset_tree.setHeaderHidden(True)
+        self.asset_tree.setColumnWidth(0, 24)
+        self.asset_tree.setIndentation(14)
+        self.asset_tree.setAnimated(True)
+
+        header = self.asset_tree.header()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.resizeSection(0, 24)
+
+        self.asset_tree.setIndentation(14)
+        self.asset_tree.setAnimated(True)
+        self.asset_tree.setMinimumWidth(250)
+        self.asset_tree.setMaximumWidth(380)
+        self.asset_tree.setSelectionMode(
             QtWidgets.QAbstractItemView.ExtendedSelection
         )
-        self.curve_list.setToolTip(
-            "Select one or more curves. Use Ctrl or Shift for multiple selection"
+        self.asset_tree.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+        self.asset_tree.setUniformRowHeights(False)
+        self.asset_tree.setToolTip(
+            "Select assets or expand them to select individual strokes. "
+            "Use Ctrl or Shift for multiple selection"
         )
 
         self.delete_button = QtWidgets.QPushButton("Delete")
@@ -320,8 +372,9 @@ class ECurveMainUI(QtWidgets.QDialog):
         scene_storage_layout.addWidget(self.load_scene_button)
 
         side_layout = QtWidgets.QVBoxLayout()
-        side_layout.addWidget(QtWidgets.QLabel("Curves"))
-        side_layout.addWidget(self.curve_list)
+        side_layout.addWidget(QtWidgets.QLabel("Asset List"))
+        side_layout.addWidget(self.asset_tree)
+
         side_layout.addLayout(curve_buttons_layout)
         side_layout.addSpacing(8)
         side_layout.addWidget(QtWidgets.QLabel("File"))
@@ -367,7 +420,7 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.content_splitter.addWidget(side_widget)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
-        self.content_splitter.setSizes([800, 270])
+        self.content_splitter.setSizes([800, 300])
 
         content_layout.addWidget(self.content_splitter)
 
@@ -397,8 +450,8 @@ class ECurveMainUI(QtWidgets.QDialog):
         self.canvas.strokesChanged.connect(self._refresh_curve_list)
         self.canvas.strokeSelected.connect(self._select_curve_list_item)
 
-        self.curve_list.itemSelectionChanged.connect(self._select_canvas_strokes)
-        self.curve_list.itemChanged.connect(self._curve_item_changed)
+        self.asset_tree.itemSelectionChanged.connect(self._select_canvas_strokes)
+        self.asset_tree.itemChanged.connect(self._tree_item_changed)
 
         self.delete_button.clicked.connect(self.canvas.delete_selected_stroke)
         self.clear_button.clicked.connect(self.canvas.clear_strokes)
@@ -435,58 +488,178 @@ class ECurveMainUI(QtWidgets.QDialog):
     def _activate_edit_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_EDIT)
 
-    def _curve_symmetry_changed(self, stroke):
-        if stroke not in self.canvas.strokes:
+    def _tree_symmetry_changed(self, drawable):
+        if drawable in self.canvas.assets:
+            self.canvas.update()
             return
-        self.canvas.update()
+
+        if drawable in self.canvas.strokes:
+            self.canvas.update()
+
+    def _create_asset_tree_item(self, asset):
+        item = QtWidgets.QTreeWidgetItem()
+        item.setFlags(
+            item.flags()
+            | QtCore.Qt.ItemIsSelectable
+            | QtCore.Qt.ItemIsEnabled
+            | QtCore.Qt.ItemIsUserCheckable
+        )
+        item.setData(0, TREE_ROLE_OBJECT, asset)
+        item.setData(0, TREE_ROLE_TYPE, TREE_TYPE_ASSET)
+        visible_strokes = [
+            stroke
+            for stroke in asset.strokes
+            if stroke in self.canvas.strokes and stroke.visible
+        ]
+
+        if not visible_strokes:
+            check_state = QtCore.Qt.Unchecked
+        elif len(visible_strokes) == len(asset.strokes):
+            check_state = QtCore.Qt.Checked
+        else:
+            check_state = QtCore.Qt.PartiallyChecked
+
+        item.setCheckState(0, check_state)
+        return item
+
+
+    def _create_stroke_tree_item(self, stroke):
+        item = QtWidgets.QTreeWidgetItem()
+        item.setFlags(
+            item.flags()
+            | QtCore.Qt.ItemIsSelectable
+            | QtCore.Qt.ItemIsEnabled
+            | QtCore.Qt.ItemIsUserCheckable
+        )
+        item.setData(0, TREE_ROLE_OBJECT, stroke)
+        item.setData(0, TREE_ROLE_TYPE, TREE_TYPE_STROKE)
+        item.setCheckState(
+            0,
+            QtCore.Qt.Checked
+            if stroke.visible
+            else QtCore.Qt.Unchecked
+        )
+        return item
+
+    def _install_asset_tree_widget(self, item, asset):
+        row_widget = ECurveTreeItemWidget(asset, is_asset=True)
+        row_widget.symmetryChanged.connect(self._tree_symmetry_changed)
+
+        item.setSizeHint(1, row_widget.sizeHint())
+        self.asset_tree.setItemWidget(item, 1, row_widget)
+
+
+    def _install_stroke_tree_widget(self, item, stroke):
+        row_widget = ECurveTreeItemWidget(stroke, is_asset=False)
+        row_widget.symmetryChanged.connect(self._tree_symmetry_changed)
+
+        item.setSizeHint(1, row_widget.sizeHint())
+        self.asset_tree.setItemWidget(item, 1, row_widget)
+
+
+    def _create_standalone_tree_item(self, stroke):
+        item = self._create_stroke_tree_item(stroke)
+        item.setData(0, TREE_ROLE_TYPE, TREE_TYPE_STANDALONE)
+        return item
+
+    def _expanded_asset_names(self):
+        names = set()
+
+        for index in range(self.asset_tree.topLevelItemCount()):
+            item = self.asset_tree.topLevelItem(index)
+
+            if item.data(0, TREE_ROLE_TYPE) != TREE_TYPE_ASSET:
+                continue
+
+            asset = item.data(0, TREE_ROLE_OBJECT)
+
+            if asset and item.isExpanded():
+                names.add(asset.name)
+
+        return names
 
     def _refresh_curve_list(self):
+        if self._syncing_asset_tree:
+            return
+
         selected_strokes = self.canvas.get_selected_strokes()
         active_stroke = self.canvas.get_selected_stroke()
+        expanded_assets = self._expanded_asset_names()
 
-        self.curve_list.blockSignals(True)
-        self.curve_list.clear()
+        self._syncing_asset_tree = True
+        previous_block_state = self.asset_tree.blockSignals(True)
 
-        active_item = None
+        try:
+            self.asset_tree.clear()
 
-        for stroke in self.canvas.strokes:
-            item = QtWidgets.QListWidgetItem()
-            item.setFlags(
-                item.flags()
-                | QtCore.Qt.ItemIsUserCheckable
-                | QtCore.Qt.ItemIsSelectable
-                | QtCore.Qt.ItemIsEnabled
-            )
-            item.setCheckState(
-                QtCore.Qt.Checked
-                if stroke.visible
-                else QtCore.Qt.Unchecked
-            )
-            item.setData(QtCore.Qt.UserRole, stroke)
+            added_strokes = set()
+            active_item = None
 
-            row_widget = ECurveListItemWidget(stroke)
-            row_widget.symmetryChanged.connect(
-                self._curve_symmetry_changed
-            )
+            for asset in self.canvas.assets:
+                asset_item = self._create_asset_tree_item(asset)
+                self.asset_tree.addTopLevelItem(asset_item)
+                self._install_asset_tree_widget(asset_item, asset)
 
-            item.setSizeHint(row_widget.sizeHint())
+                asset_strokes = [
+                    stroke
+                    for stroke in asset.strokes
+                    if stroke in self.canvas.strokes
+                ]
 
-            self.curve_list.addItem(item)
-            self.curve_list.setItemWidget(item, row_widget)
+                asset_is_selected = (
+                    bool(asset_strokes)
+                    and all(
+                        stroke in selected_strokes
+                        for stroke in asset_strokes
+                    )
+                )
 
-            if stroke in selected_strokes:
-                item.setSelected(True)
+                asset_item.setSelected(asset_is_selected)
+                asset_item.setExpanded(asset.name in expanded_assets)
 
-            if stroke is active_stroke:
-                active_item = item
+                for stroke in asset_strokes:
+                    stroke_item = self._create_stroke_tree_item(stroke)
+                    asset_item.addChild(stroke_item)
+                    self._install_stroke_tree_widget(stroke_item, stroke)
 
-        if active_item:
-            self.curve_list.setCurrentItem(
-                active_item,
-                QtCore.QItemSelectionModel.NoUpdate
-            )
+                    added_strokes.add(stroke)
 
-        self.curve_list.blockSignals(False)
+                    if not asset_is_selected:
+                        stroke_item.setSelected(
+                            stroke in selected_strokes
+                        )
+
+                    if stroke is active_stroke:
+                        active_item = stroke_item
+
+            for stroke in self.canvas.strokes:
+                if stroke in added_strokes:
+                    continue
+
+                standalone_item = self._create_standalone_tree_item(stroke)
+                self.asset_tree.addTopLevelItem(standalone_item)
+                self._install_stroke_tree_widget(
+                    standalone_item,
+                    stroke
+                )
+
+                standalone_item.setSelected(
+                    stroke in selected_strokes
+                )
+
+                if stroke is active_stroke:
+                    active_item = standalone_item
+
+            if active_item:
+                self.asset_tree.setCurrentItem(
+                    active_item,
+                    0,
+                    QtCore.QItemSelectionModel.NoUpdate
+                )
+
+        finally:
+            self.asset_tree.blockSignals(previous_block_state)
+            self._syncing_asset_tree = False
 
     def _build_asset_item(self, asset):
         return {
@@ -513,31 +686,75 @@ class ECurveMainUI(QtWidgets.QDialog):
 
         self.asset_strip.set_items(items)
 
-    def _select_curve_list_item(self, stroke):
-        selected_strokes = self.canvas.get_selected_strokes()
+    def _select_curve_list_item(self, active_stroke):
+        if self._syncing_asset_tree:
+            return
 
-        self.curve_list.blockSignals(True)
-        self.curve_list.clearSelection()
+        self._syncing_asset_tree = True
+        previous_block_state = self.asset_tree.blockSignals(True)
 
-        active_item = None
+        try:
+            selected_strokes = self.canvas.get_selected_strokes()
+            self.asset_tree.clearSelection()
+            active_item = None
 
-        for index in range(self.curve_list.count()):
-            item = self.curve_list.item(index)
-            item_stroke = item.data(QtCore.Qt.UserRole)
+            for index in range(self.asset_tree.topLevelItemCount()):
+                top_item = self.asset_tree.topLevelItem(index)
+                item_type = top_item.data(0, TREE_ROLE_TYPE)
+                drawable = top_item.data(0, TREE_ROLE_OBJECT)
 
-            if item_stroke in selected_strokes:
-                item.setSelected(True)
+                if item_type == TREE_TYPE_ASSET:
+                    asset_strokes = [
+                        stroke
+                        for stroke in drawable.strokes
+                        if stroke in self.canvas.strokes
+                    ]
 
-            if item_stroke is stroke:
-                active_item = item
+                    asset_is_selected = (
+                        bool(asset_strokes)
+                        and all(
+                            stroke in selected_strokes
+                            for stroke in asset_strokes
+                        )
+                    )
 
-        if active_item:
-            self.curve_list.setCurrentItem(
-                active_item,
-                QtCore.QItemSelectionModel.NoUpdate
-            )
+                    top_item.setSelected(asset_is_selected)
 
-        self.curve_list.blockSignals(False)
+                    for child_index in range(top_item.childCount()):
+                        child = top_item.child(child_index)
+                        stroke = child.data(0, TREE_ROLE_OBJECT)
+
+                        child.setSelected(
+                            not asset_is_selected
+                            and stroke in selected_strokes
+                        )
+
+                        if stroke is active_stroke:
+                            active_item = child
+
+                elif drawable in self.canvas.strokes:
+                    top_item.setSelected(
+                        drawable in selected_strokes
+                    )
+
+                    if drawable is active_stroke:
+                        active_item = top_item
+
+            if active_item:
+                parent = active_item.parent()
+
+                if parent:
+                    parent.setExpanded(True)
+
+                self.asset_tree.setCurrentItem(
+                    active_item,
+                    0,
+                    QtCore.QItemSelectionModel.NoUpdate
+                )
+
+        finally:
+            self.asset_tree.blockSignals(previous_block_state)
+            self._syncing_asset_tree = False
 
     def _activate_transform_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_TRANSFORM)
@@ -613,24 +830,169 @@ class ECurveMainUI(QtWidgets.QDialog):
         return QtGui.QColor(240, 240, 240)
 
     def _select_canvas_strokes(self):
-        strokes = [
-            item.data(QtCore.Qt.UserRole)
-            for item in self.curve_list.selectedItems()
+        if self._syncing_asset_tree:
+            return
+
+        self._syncing_asset_tree = True
+
+        try:
+            strokes = []
+            active_stroke = None
+            current_item = self.asset_tree.currentItem()
+
+            for item in self.asset_tree.selectedItems():
+                item_type = item.data(0, TREE_ROLE_TYPE)
+                drawable = item.data(0, TREE_ROLE_OBJECT)
+
+                if item_type == TREE_TYPE_ASSET:
+                    asset_strokes = [
+                        stroke
+                        for stroke in drawable.strokes
+                        if stroke in self.canvas.strokes
+                        and stroke.visible
+                    ]
+
+                    for stroke in asset_strokes:
+                        if stroke not in strokes:
+                            strokes.append(stroke)
+
+                    if item is current_item and asset_strokes:
+                        active_stroke = asset_strokes[-1]
+
+                elif (
+                    item_type in (
+                        TREE_TYPE_STROKE,
+                        TREE_TYPE_STANDALONE
+                    )
+                    and drawable in self.canvas.strokes
+                    and drawable.visible
+                ):
+                    if drawable not in strokes:
+                        strokes.append(drawable)
+
+                    if item is current_item:
+                        active_stroke = drawable
+
+            if active_stroke not in strokes:
+                active_stroke = strokes[-1] if strokes else None
+
+            self.canvas.set_selected_strokes(
+                strokes,
+                active_stroke=active_stroke
+            )
+
+        finally:
+            self._syncing_asset_tree = False
+
+    def _tree_item_changed(self, item, column):
+        if self._syncing_asset_tree or column != 0:
+            return
+
+        drawable = item.data(0, TREE_ROLE_OBJECT)
+        item_type = item.data(0, TREE_ROLE_TYPE)
+
+        if drawable is None:
+            return
+
+        visible = item.checkState(0) == QtCore.Qt.Checked
+        self._syncing_asset_tree = True
+
+        try:
+            if item_type == TREE_TYPE_ASSET:
+                self._set_asset_item_visibility(
+                    item,
+                    drawable,
+                    visible
+                )
+                return
+
+            if item_type in (
+                TREE_TYPE_STROKE,
+                TREE_TYPE_STANDALONE
+            ):
+                self.canvas.set_stroke_visibility(
+                    drawable,
+                    visible,
+                    notify=False
+                )
+
+                parent_item = item.parent()
+
+                if parent_item:
+                    self._update_asset_item_check_state(parent_item)
+
+        finally:
+            self._syncing_asset_tree = False
+
+    def _update_asset_item_check_state(self, asset_item):
+        asset = asset_item.data(0, TREE_ROLE_OBJECT)
+
+        if asset is None:
+            return
+
+        child_states = [
+            asset_item.child(index).checkState(0)
+            for index in range(asset_item.childCount())
         ]
 
-        active_item = self.curve_list.currentItem()
-        active_stroke = (
-            active_item.data(QtCore.Qt.UserRole)
-            if active_item
-            else None
-        )
+        if not child_states:
+            state = QtCore.Qt.Unchecked
+            asset.visible = False
 
-        self.canvas.set_selected_strokes(strokes,active_stroke=active_stroke)
+        elif all(
+            child_state == QtCore.Qt.Checked
+            for child_state in child_states
+        ):
+            state = QtCore.Qt.Checked
+            asset.visible = True
 
-    def _curve_item_changed(self, item):
-        stroke = item.data(QtCore.Qt.UserRole)
-        visible = item.checkState() == QtCore.Qt.Checked
-        self.canvas.set_stroke_visibility(stroke, visible)
+        elif all(
+            child_state == QtCore.Qt.Unchecked
+            for child_state in child_states
+        ):
+            state = QtCore.Qt.Unchecked
+            asset.visible = False
+
+        else:
+            state = QtCore.Qt.PartiallyChecked
+            asset.visible = True
+
+        previous_block_state = self.asset_tree.blockSignals(True)
+
+        try:
+            asset_item.setCheckState(0, state)
+
+        finally:
+            self.asset_tree.blockSignals(previous_block_state)
+
+    def _set_asset_item_visibility(
+        self,
+        asset_item,
+        asset,
+        visible
+    ):
+        previous_block_state = self.asset_tree.blockSignals(True)
+
+        try:
+            check_state = (
+                QtCore.Qt.Checked
+                if visible
+                else QtCore.Qt.Unchecked
+            )
+
+            for index in range(asset_item.childCount()):
+                child_item = asset_item.child(index)
+                child_item.setCheckState(0, check_state)
+
+            self.canvas.set_asset_visibility(
+                asset,
+                visible,
+                notify=False
+            )
+
+        finally:
+            self.asset_tree.blockSignals(previous_block_state)
+
 
     def _save_svg(self):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(

@@ -243,13 +243,49 @@ class ECurveCanvas(QtWidgets.QWidget):
     def get_visible_strokes(self):
         return [stroke for stroke in self.strokes if stroke.visible]
 
-    def set_stroke_visibility(self, stroke, visible):
+    def set_stroke_visibility(self, stroke, visible, notify=True):
         if stroke not in self.strokes:
             return
 
         stroke.visible = bool(visible)
+
+        if not stroke.visible and stroke in self.selected_strokes:
+            selected = [
+                selected_stroke
+                for selected_stroke in self.selected_strokes
+                if selected_stroke is not stroke
+            ]
+            self.set_selected_strokes(selected)
+
         self.update()
-        self.strokesChanged.emit()
+
+        if notify:
+            self.strokesChanged.emit()
+
+    def set_asset_visibility(self, asset, visible, notify=True):
+        if asset not in self.assets:
+            return
+
+        visible = bool(visible)
+        asset.visible = visible
+
+        for stroke in asset.strokes:
+            if stroke in self.strokes:
+                stroke.visible = visible
+
+        selected = [
+            stroke
+            for stroke in self.selected_strokes
+            if stroke.visible
+        ]
+
+        if selected != self.selected_strokes:
+            self.set_selected_strokes(selected)
+
+        self.update()
+
+        if notify:
+            self.strokesChanged.emit()
 
     def get_selected_stroke(self):
         return self.selected_stroke
@@ -268,8 +304,6 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         self.strokeSelected.emit(None)
         self.update()
-
-
 
     # ------------------------------------------------------------------
     # Asset to stroke management methods
@@ -1088,6 +1122,25 @@ class ECurveCanvas(QtWidgets.QWidget):
         radial_count = self.radial_count
 
         if stroke is not None:
+            asset = stroke.asset
+
+            if asset is not None:
+                vertical_enabled = (
+                    vertical_enabled
+                    and asset.vertical_symmetry_enabled
+                )
+                horizontal_enabled = (
+                    horizontal_enabled
+                    and asset.horizontal_symmetry_enabled
+                )
+                radial_enabled = (
+                    radial_enabled
+                    and asset.radial_symmetry_enabled
+                )
+
+                if asset.radial_count_override > 0:
+                    radial_count = asset.radial_count_override
+
             vertical_enabled = (
                 vertical_enabled
                 and stroke.vertical_symmetry_enabled
