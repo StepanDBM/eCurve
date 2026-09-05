@@ -9,6 +9,63 @@ import maya.cmds as cmds
 
 from eCurve_canvas import ECurveCanvas
 from eCurve_storage import ECurveStorage
+from eCurve_asset_strip import eCurveAssetStrip
+from eCurve_primitives import PRIMITIVE_INFO, create_primitive
+
+
+PRIMITIVE_ITEMS = [
+    {
+        "name": info["name"],
+        "type": "primitive",
+        "primitive": primitive_type,
+        "category": info["category"],
+        "tooltip": "Create a {} primitive".format(
+            info["name"].lower()
+        ),
+    }
+    for primitive_type, info in PRIMITIVE_INFO.items()
+]
+
+
+ASSET_ITEMS = [
+    {
+        "name": "FK Circle",
+        "type": "asset",
+        "asset_id": "fk_circle",
+        "strokes": [],
+        "tooltip": "Insert the FK Circle asset",
+    },
+    {
+        "name": "IK Square",
+        "type": "asset",
+        "asset_id": "ik_square",
+        "strokes": [],
+        "tooltip": "Insert the IK Square asset",
+    },
+    {
+        "name": "Rounded Star",
+        "type": "asset",
+        "asset_id": "rounded_star",
+        "strokes": [],
+        "tooltip": "Insert the Rounded Star asset",
+    },
+    {
+        "name": "Hand",
+        "type": "asset",
+        "asset_id": "hand",
+        "strokes": [],
+        "tooltip": "Insert the Hand asset",
+    },
+    {
+        "name": "Foot",
+        "type": "asset",
+        "asset_id": "foot",
+        "strokes": [],
+        "tooltip": "Insert the Foot asset",
+    },
+]
+
+
 
 class ECurveListItemWidget(QtWidgets.QWidget):
     symmetryChanged = QtCore.Signal(object)
@@ -118,6 +175,23 @@ class ECurveMainUI(QtWidgets.QDialog):
         self._build_ui()
         self._connect_signals()
         self._refresh_curve_list()
+
+    def _create_strip_section(self, title, strip, extra_widget=None):
+        section = QtWidgets.QWidget()
+
+        title_label = QtWidgets.QLabel(title)
+        title_label.setFixedWidth(65)
+
+        layout = QtWidgets.QHBoxLayout(section)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(6)
+        layout.addWidget(title_label)
+        layout.addWidget(strip, 1)
+
+        if extra_widget:
+            layout.addWidget(extra_widget)
+
+        return section
 
     def _build_ui(self):
         self.pencil_button = QtWidgets.QPushButton("Pencil")
@@ -272,14 +346,59 @@ class ECurveMainUI(QtWidgets.QDialog):
         side_layout.addSpacing(8)
         side_layout.addWidget(self.create_button)
 
-        content_layout = QtWidgets.QHBoxLayout()
-        content_layout.addWidget(self.canvas, 1)
-        content_layout.addLayout(side_layout, 0)
+        self.primitive_strip = eCurveAssetStrip(PRIMITIVE_ITEMS)
+        self.asset_strip = eCurveAssetStrip(ASSET_ITEMS)
+
+        self.save_asset_button = QtWidgets.QPushButton("Save Asset")
+
+        self.primitive_section = self._create_strip_section("Primitives:",
+            self.primitive_strip,
+        )
+
+        self.asset_section = self._create_strip_section(
+            "Assets:",
+            self.asset_strip,
+            self.save_asset_button,
+        )
+
+        content_widget = QtWidgets.QWidget()
+        content_layout = QtWidgets.QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        side_widget = QtWidgets.QWidget()
+        side_widget.setLayout(side_layout)
+        side_widget.setMinimumWidth(0)
+        side_widget.setMaximumWidth(16777215)
+
+        self.content_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.content_splitter.setChildrenCollapsible(True)
+        self.content_splitter.setHandleWidth(5)
+        self.content_splitter.addWidget(self.canvas)
+        self.content_splitter.addWidget(side_widget)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setSizes([800, 270])
+
+        content_layout.addWidget(self.content_splitter)
+
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.main_splitter.setChildrenCollapsible(True)
+        self.main_splitter.setHandleWidth(5)
+        self.main_splitter.addWidget(self.primitive_section)
+        self.main_splitter.addWidget(self.asset_section)
+        self.main_splitter.addWidget(content_widget)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setStretchFactor(2, 1)
+        self.main_splitter.setSizes([68, 68, 600])
 
         main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(4)
         main_layout.addLayout(toolbar_layout)
         main_layout.addLayout(symmetry_layout)
-        main_layout.addLayout(content_layout, 1)
+        main_layout.addWidget(self.main_splitter, 1)
 
     def _connect_signals(self):
         self.pencil_button.clicked.connect(self._activate_pencil_tool)
@@ -316,6 +435,11 @@ class ECurveMainUI(QtWidgets.QDialog):
             lambda enabled: self.tolerance_spin.setEnabled(not enabled))
         self.transform_operation_combo.currentIndexChanged.connect(self._transform_operation_changed)
 
+
+        self.primitive_strip.item_clicked.connect(self._primitive_clicked)
+        self.asset_strip.item_clicked.connect(self._asset_clicked)
+        self.save_asset_button.clicked.connect(self._save_asset_clicked)
+
     def _activate_pencil_tool(self):
         self.canvas.set_tool(ECurveCanvas.TOOL_PENCIL)
 
@@ -325,7 +449,6 @@ class ECurveMainUI(QtWidgets.QDialog):
     def _curve_symmetry_changed(self, stroke):
         if stroke not in self.canvas.strokes:
             return
-
         self.canvas.update()
 
     def _refresh_curve_list(self):
@@ -677,3 +800,31 @@ class ECurveMainUI(QtWidgets.QDialog):
             cmds.delete(curve)
 
         return control
+
+    def _primitive_clicked(self, item_data):
+        primitive_type = item_data.get("primitive")
+
+        if not primitive_type:
+            cmds.warning("eCurve: Invalid primitive information.")
+            return
+
+        try:
+            asset = create_primitive(primitive_type)
+            self.canvas.add_asset(asset)
+
+        except Exception as error:
+            cmds.warning(
+                "eCurve: Could not create primitive '{}': {}".format(
+                    item_data.get("name", primitive_type),
+                    error
+                )
+            )
+
+
+    def _asset_clicked(self, item_data):
+        print("Asset clicked:", item_data["name"])
+        print("Asset data:", item_data)
+
+
+    def _save_asset_clicked(self):
+        print("Save Asset clicked.")

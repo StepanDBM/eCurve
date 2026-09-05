@@ -6,62 +6,7 @@ except ImportError:
 
 import math
 
-
-class ECurveStroke:
-    def __init__(self, name, points=None):
-        self.name = name
-        self.raw_points = list(points or [])
-        self.points = list(points or [])
-        self.visible = True
-        self.selected = False
-        self.closed = False
-        self.edited = False
-
-        self.horizontal_symmetry_enabled = True
-        self.vertical_symmetry_enabled = True
-        self.radial_symmetry_enabled = True
-        self.radial_count_override = 0
-    def simplify(self, tolerance):
-        if len(self.raw_points) < 3:
-            self.points = list(self.raw_points)
-            return
-
-        self.points = douglas_peucker(self.raw_points, tolerance)
-
-    def set_points(self, points, edited=False):
-        self.raw_points = [QtCore.QPointF(point) for point in points]
-        self.points = [QtCore.QPointF(point) for point in points]
-
-        if edited:
-            self.edited = True
-
-    def make_editable(self):
-        if self.edited:
-            return
-
-        self.raw_points = list(self.points)
-        self.edited = True
-
-    def set_point(self, index, point):
-        if not 0 <= index < len(self.points):
-            return
-
-        self.points[index] = QtCore.QPointF(point)
-        self.raw_points = list(self.points)
-        self.edited = True
-
-    def delete_point(self, index):
-        if len(self.points) <= 2:
-            return False
-
-        if not 0 <= index < len(self.points):
-            return False
-
-        del self.points[index]
-        self.raw_points = list(self.points)
-        self.edited = True
-        return True
-
+from eCurve_drawables import ECurveAsset, ECurveStroke
 
 class ECurveCanvas(QtWidgets.QWidget):
     strokeCreated = QtCore.Signal(object)
@@ -101,6 +46,7 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
+        self.assets = []
         self.strokes = []
         self.active_stroke = None
         self.selected_stroke = None
@@ -380,6 +326,11 @@ class ECurveCanvas(QtWidgets.QWidget):
 
         self.strokes.remove(stroke)
 
+        if stroke.asset and stroke in stroke.asset.strokes:
+            stroke.asset.strokes.remove(stroke)
+
+        self._remove_empty_assets()
+
         selected = [
             item
             for item in self.selected_strokes
@@ -403,14 +354,22 @@ class ECurveCanvas(QtWidgets.QWidget):
             return
 
         for stroke in selected:
-            if stroke in self.strokes:
-                self.strokes.remove(stroke)
+            if stroke not in self.strokes:
+                continue
+
+            self.strokes.remove(stroke)
+
+            if stroke.asset and stroke in stroke.asset.strokes:
+                stroke.asset.strokes.remove(stroke)
+
+        self._remove_empty_assets()
 
         self.clear_selection()
         self.strokesChanged.emit()
         self.update()
 
     def clear_strokes(self):
+        self.assets.clear()
         self.strokes.clear()
         self.active_stroke = None
         self.selected_stroke = None
@@ -425,6 +384,112 @@ class ECurveCanvas(QtWidgets.QWidget):
         self.update()
         self.strokeSelected.emit(None)
         self.strokesChanged.emit()
+
+    def visible_canvas_center(self):
+        return self.view_to_canvas(self.view_center())
+
+    def unique_asset_name(self, base_name):
+        existing_names = {asset.name for asset in self.assets}
+
+        if base_name not in existing_names:
+            return base_name
+
+        index = 2
+
+        while "{}_{:02d}".format(base_name, index) in existing_names:
+            index += 1
+
+        return "{}_{:02d}".format(base_name, index)
+
+    def unique_stroke_name(self, base_name):
+        existing_names = {stroke.name for stroke in self.strokes}
+
+        if base_name not in existing_names:
+            return base_name
+
+        index = 2
+
+        while "{}_{:02d}".format(base_name, index) in existing_names:
+            index += 1
+
+        return "{}_{:02d}".format(base_name, index)
+
+    def asset_strokes(self, stroke):
+        if stroke is None:
+            return []
+
+        if stroke.asset is None:
+            return [stroke]
+
+        return [
+            asset_stroke
+            for asset_stroke in stroke.asset.strokes
+            if asset_stroke in self.strokes
+        ]
+
+    def add_asset(self, asset, position=None, select=True):
+        if not isinstance(asset, ECurveAsset):
+            raise TypeError("Expected ECurveAsset, got {}".format(type(asset)))
+
+        asset = asset.copy()
+        asset.name = self.unique_asset_name(asset.name)
+
+        if position is None:
+            position = self.visible_canvas_center()
+        else:
+            position = QtCore.QPointF(position)
+
+        asset_center = asset.pivot()
+        offset = position - asset_center
+        created_strokes = []
+
+        for index, stroke in enumerate(asset.strokes):
+            points = [point + offset for point in stroke.points]
+            raw_points = [point + offset for point in stroke.raw_points]
+
+            stroke.points = points
+            stroke.raw_points = raw_points
+            stroke.asset = asset
+
+            if len(asset.strokes) == 1:
+                stroke.name = self.unique_stroke_name(asset.name)
+            else:
+                stroke.name = self.unique_stroke_name(
+                    "{}_{:02d}".format(asset.name, index + 1)
+                )
+
+            self.strokes.append(stroke)
+            created_strokes.append(stroke)
+            self.strokeCreated.emit(stroke)
+
+        if not created_strokes:
+            return []
+
+        self.assets.append(asset)
+
+        if select:
+            self.set_selected_strokes(
+                created_strokes,
+                active_stroke=created_strokes[-1]
+            )
+
+        self.strokesChanged.emit()
+        self.update()
+        self.setFocus()
+        return created_strokes
+
+    def _remove_empty_assets(self):
+        active_assets = {
+            stroke.asset
+            for stroke in self.strokes
+            if stroke.asset is not None
+        }
+
+        self.assets = [
+            asset
+            for asset in self.assets
+            if asset in active_assets
+        ]
 
     # ------------------------------------------------------------------
     # Mouse methods
@@ -612,16 +677,37 @@ class ECurveCanvas(QtWidgets.QWidget):
             stroke = self.stroke_at(canvas_position, threshold)
 
             if stroke:
-                was_selected = stroke in self.selected_strokes
+                related_strokes = self.asset_strokes(stroke)
+                was_selected = all(
+                    related_stroke in self.selected_strokes
+                    for related_stroke in related_strokes
+                )
 
-                if additive:
-                    self.select_stroke(stroke, additive=True)
+                if subtractive:
+                    selected = [
+                        selected_stroke
+                        for selected_stroke in self.selected_strokes
+                        if selected_stroke not in related_strokes
+                    ]
+                    self.set_selected_strokes(selected)
 
-                elif subtractive:
-                    self.select_stroke(stroke, subtractive=True)
+                elif additive:
+                    selected = list(self.selected_strokes)
+
+                    for related_stroke in related_strokes:
+                        if related_stroke not in selected:
+                            selected.append(related_stroke)
+
+                    self.set_selected_strokes(
+                        selected,
+                        active_stroke=stroke
+                    )
 
                 elif not was_selected:
-                    self.select_stroke(stroke)
+                    self.set_selected_strokes(
+                        related_strokes,
+                        active_stroke=stroke
+                    )
 
                 else:
                     self.selected_stroke = stroke
@@ -1282,8 +1368,14 @@ class ECurveCanvas(QtWidgets.QWidget):
         return closest_index
 
     def _begin_stroke(self, position):
-        name = "Curve_{:02d}".format(len(self.strokes) + 1)
-        self.active_stroke = ECurveStroke(name, [position])
+        base_name = "Curve_{:02d}".format(len(self.strokes) + 1)
+        name = self.unique_stroke_name(base_name)
+
+        self.active_stroke = ECurveStroke(
+            points=[position],
+            closed=False,
+            name=name
+        )
         self.update()
 
     def _append_stroke_point(self, position):
